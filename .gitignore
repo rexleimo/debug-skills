@@ -1,0 +1,4 @@
+.DS_Store
+.debug-logs/
+__pycache__/
+*.pyc
