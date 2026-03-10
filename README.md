@@ -54,6 +54,7 @@ That makes the debugging process easier to audit, easier to repeat, and much les
 - Per-hypothesis logging and before/after comparison
 - Local collector bootstrap when the host does not already provide logging
 - Guardrails against stale logs, speculative fallback code, and leaked debug scaffolding
+- Browser-first log transport for frontend debugging, with explicit prohibition on app-local proxy routes unless direct delivery is proven blocked
 
 ## Runtime Compatibility
 
@@ -106,6 +107,8 @@ Load the debug workflow from SKILL.md and debug this flaky save action using run
 ## Local Collector
 
 The bundled collector is a zero-dependency Python app built on the standard library. It accepts JSON log events, appends them to an NDJSON file, and serves a same-origin dashboard for live inspection.
+
+For frontend and browser debugging, the intended transport is direct client-to-collector HTTP posting. The collector already handles CORS and preflight, so the skill should not create temporary Next.js API routes or other app-local proxy layers unless direct browser delivery has been proven blocked in the current host.
 
 Endpoints:
 

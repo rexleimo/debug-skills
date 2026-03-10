@@ -28,7 +28,8 @@ Adapt the workflow to the current host before running commands:
 2. Confirm how the host keeps long-lived processes alive: persistent PTY, detached job, task runner, or another supported mechanism.
 3. If no authoritative logging configuration already exists, resolve a local Python 3 interpreter for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If neither is available, stop and tell the user you need either an existing logging session or Python 3 for this evidence-first mode.
 4. Confirm whether the host can open or automate browser pages. If not, rely on the ready file and HTTP APIs.
-5. Confirm how the user signals that reproduction is complete. Use the host's real action label or request a short reply if no action exists.
+5. Confirm whether planned instrumentation runs in browser/client code, server/runtime code, or both. For browser/client code, prefer direct posts to the active collector endpoint and do not assume an app-local proxy is required.
+6. Confirm how the user signals that reproduction is complete. Use the host's real action label or request a short reply if no action exists.
 
 ## Active logging session
 
@@ -182,6 +183,8 @@ The bundled collector must not introduce browser CORS issues:
 - Return `Access-Control-Allow-Headers: Content-Type, X-Debug-Session-Id`.
 - Return `Access-Control-Allow-Methods: GET, POST, OPTIONS`.
 
+This collector behavior exists so browser/client instrumentation can post directly to the collector from frontend apps, including Next.js dev apps. Do not add project-local proxy routes such as `/api/_dev/*` unless you have already proven that direct browser delivery is blocked in the current host.
+
 ## Clearing the active log file
 
 Before each reproduction run or any deliberate re-recording pass, clear only the active session's existing logs. Prefer the clear endpoint when one is available because it keeps the collector UI, cache, and file state aligned:
@@ -222,7 +225,7 @@ Omit `sessionId` and any session header only when the session explicitly says no
 
 ## JavaScript / TypeScript template
 
-When an active HTTP ingestion endpoint exists, use a compact `fetch` call and swallow failures. If you started the bundled local collector, use its `endpoint` value from the ready file. When the same file contains multiple temporary logs, prefer one file-local endpoint constant inside the debug region so a collector restart only requires one endpoint edit in that file. The collector responds to browser preflight and includes the CORS headers required for this request:
+When an active HTTP ingestion endpoint exists, use a compact `fetch` call and swallow failures. If you started the bundled local collector, use its `endpoint` value from the ready file. When the same file contains multiple temporary logs, prefer one file-local endpoint constant inside the debug region so a collector restart only requires one endpoint edit in that file. For browser/client instrumentation, call the collector directly instead of creating a Next.js API route or another app-local proxy unless direct delivery is proven blocked in the current host. The collector responds to browser preflight and includes the CORS headers required for this request:
 
 ```ts
 // #region agent log config
@@ -254,6 +257,8 @@ Remove `X-Debug-Session-Id` and `sessionId` only when the session ID is explicit
 ## Non-JavaScript template
 
 If the target runtime already has a lightweight HTTP client, send the same payload to the active endpoint. Otherwise append one NDJSON line to the active log path with standard-library file I/O. Keep the snippet tiny and close the file immediately after writing.
+
+For JavaScript or TypeScript that runs only on the server, still call the active collector endpoint directly from that runtime instead of adding a second project-local ingest layer unless a proven environment constraint forces it.
 
 ## Reading evidence
 
