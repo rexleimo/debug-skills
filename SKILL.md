@@ -1,6 +1,6 @@
 ---
 name: debug
-description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation.
+description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation, especially for browser or frontend issues where logs should go directly to the active collector endpoint instead of app-local proxy APIs.
 ---
 
 # Debug
@@ -15,6 +15,7 @@ Before starting, normalize the current agent runtime:
 - If no authoritative logging configuration exists, determine whether a local Python 3 interpreter is available for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If no Python 3 interpreter is available, stop and tell the user you need either an existing logging session or a local Python 3 runtime before continuing in evidence-first mode.
 - Determine how the host keeps long-lived processes alive: persistent PTY, detached shell, task runner, or no background support.
 - Determine whether the host can open or automate browser pages. If not, rely on the collector's ready file and HTTP APIs instead of UI inspection.
+- Determine whether each planned log point runs in browser/client code, server/runtime code, or both. For browser/client code, prefer direct requests to the active collector endpoint instead of adding project-local proxy routes.
 - Determine how the user signals that reproduction is complete: explicit UI button, task-state action, or a short chat reply.
 - Store temporary artifacts in an existing host-specific scratch directory when one already exists. Otherwise default to a workspace-local hidden directory such as `.debug-logs/`.
 
@@ -22,7 +23,7 @@ Before starting, normalize the current agent runtime:
 
 1. Generate 3-5 precise hypotheses about why the bug happens. Make them specific enough that a log can confirm or reject each one.
 2. Establish the active logging session before editing app code. If the session already provides a logging endpoint, log path, session ID, or ready file, use those values exactly. Otherwise first resolve a local Python 3 interpreter for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If no Python 3 interpreter is available, stop and tell the user you cannot proceed in this evidence-first mode unless they provide an authoritative logging session or make Python 3 available. When a Python 3 interpreter is available, start the bundled local collector app from `scripts/local_log_collector/main.py`, resolved relative to this skill's root directory, create a session-specific NDJSON log file, and treat the service's ready file as authoritative. If the command runner reaps child processes when the command returns, keep the collector alive in a persistent PTY or the host's equivalent long-lived session mechanism instead of assuming a plain trailing `&` is enough. The bundled service attempts to open its `dashboardUrl` in the system browser by default for live summary, log clearing, and service shutdown controls. If the ready file reports that this browser-open attempt succeeded, do not also open the same page with MCP or browser automation. Only fall back to MCP or an embedded browser when the ready file reports that the auto-open attempt failed, or when auto-open was intentionally disabled.
-3. Add the minimum instrumentation needed to test all hypotheses in parallel. Prefer 2-6 logs; never skip instrumentation; do not exceed 10 logs.
+3. Add the minimum instrumentation needed to test all hypotheses in parallel. Prefer 2-6 logs; never skip instrumentation; do not exceed 10 logs. When instrumenting browser/client JavaScript, send logs directly to the active collector endpoint unless runtime evidence proves direct delivery is blocked in the current host.
 4. Before each reproduction run or deliberate re-recording pass, verify that the current logging process is still alive. Prefer the active `healthUrl` or `stateUrl` when one exists. If the process has been closed or the check fails, start a new collector process and treat its new ready file values as authoritative before continuing.
 5. If restarting the collector changed the active ingest endpoint or port, update the existing temporary logging code so it no longer points at the stale port. Apply that refresh before the next reproduction run and keep the edits limited to the active debug instrumentation for the current task.
 6. Preserve any evidence you still need from the current run, then clear only the active session's existing logs so the next run starts from a low-noise baseline. Prefer the active clear endpoint when one exists; fall back to truncating the active session log file only when no clear endpoint is available.
@@ -49,6 +50,8 @@ Before starting, normalize the current agent runtime:
 - Prefer targeted edits that match existing architecture and utilities.
 - Never analyze service stdout when the session log file is available; read the NDJSON log file directly.
 - Never split the dashboard and ingest API across separate local origins when the bundled collector can serve both from one place.
+- Never add a Next.js API route, server action, middleware, or any app-local proxy endpoint just to forward browser debug logs when the collector endpoint is directly reachable.
+- Never route browser/client debug traffic through the target app's backend as a first choice. Only use that fallback after proving direct browser-to-collector delivery is blocked in the current host, and record that evidence in the debugging notes.
 - Never clear the active session's logs before preserving any evidence you still need from the current run.
 - Never assume a previously started logging process is still alive before a new recording pass; verify it or start a new collector first.
 - Never open the same dashboard twice. If the bundled collector already opened the dashboard successfully, do not call MCP or browser automation just to open that page again.
@@ -62,7 +65,8 @@ Before starting, normalize the current agent runtime:
 - Wrap each inserted debug log in a collapsible code region when the language supports regions.
 - If the session provides a logging endpoint, log path, session ID, or ready file, treat those values as authoritative and use them exactly.
 - When the session provides no logging configuration, prefer the bundled local collector service over ad hoc console logging or temporary files. If no Python 3 interpreter is available for that collector, stop and tell the user the configured debug mode cannot continue until they provide an authoritative logging session or a local Python 3 runtime.
-- For JavaScript or TypeScript, prefer the active HTTP ingestion endpoint. Default to the local collector endpoint when you started the bundled service.
+- For JavaScript or TypeScript running in browser/client code, send logs directly to the active HTTP ingestion endpoint. Default to the local collector endpoint when you started the bundled service.
+- For JavaScript or TypeScript running only on the server, use the same active HTTP endpoint from that runtime instead of inventing a second ingest layer.
 - For non-JavaScript languages, prefer the active HTTP endpoint when the runtime already has a lightweight HTTP client. Otherwise append NDJSON directly to the active session log file.
 - When you started the bundled collector, use its same-origin dashboard for live status and operator actions instead of building a second local UI.
 - The bundled collector should auto-open the dashboard unless you intentionally started it with `--no-open-dashboard`.
@@ -71,6 +75,7 @@ Before starting, normalize the current agent runtime:
 - Before a rerun, verify the current logging process is still reachable. If it is not, re-establish a new active session before clearing logs or asking for reproduction.
 - If the active collector endpoint changes after a restart, update the inserted temporary logging code to use the new endpoint before the next run.
 - When you insert more than one temporary log in the same file, prefer a single file-local endpoint constant inside the debug region so a collector restart requires one endpoint edit in that file instead of many.
+- Do not create project-local logging proxy routes, server actions, middleware, or backend forwarding endpoints for client instrumentation unless direct browser delivery is proven impossible in the current host.
 - When you need a clean rerun, clear the current session's existing logs before collecting the next pass so stale entries do not pollute the evidence.
 - Prefer calling the active clear endpoint for that reset when one exists. Only truncate the active session log file directly when no clear endpoint is available.
 - Read the active session log file itself when analyzing evidence.
