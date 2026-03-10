@@ -69,7 +69,19 @@ If your runtime ignores [`skills/debug/agents/openai.yaml`](./skills/debug/agent
 
 ## Install
 
-Install the packaged skill from [`skills/debug/`](./skills/debug/) as a local skill named `debug`.
+Preferred install via the `skills` CLI:
+
+```bash
+npx skills add JUNERDD/runtime-debug-skill --skill debug
+```
+
+For a global Codex install:
+
+```bash
+npx skills add JUNERDD/runtime-debug-skill --skill debug -g -a codex -y
+```
+
+Manual install still works if your runtime does not use the CLI. Copy [`skills/debug/`](./skills/debug/) as a local skill named `debug`.
 
 | Runtime | Install path | Notes |
 | --- | --- | --- |
