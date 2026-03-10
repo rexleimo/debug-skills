@@ -1,102 +1,113 @@
 # Runtime Debug Skill
 
-Evidence-first runtime debugging skill for Codex-compatible agents.
+Evidence-first runtime debugging for agent runtimes that support reusable local skills, prompt modules, or workflow packs.
 
-This repository packages a reusable `debug` skill that forces the agent to prove a bug with runtime logs before changing behavior. It includes:
+This repository is not tied to Codex alone. The core behavior lives in [`SKILL.md`](./SKILL.md), so any agent system that can load a skill directory and follow Markdown instructions can reuse it. [`agents/openai.yaml`](./agents/openai.yaml) is only an optional metadata adapter for runtimes that support OpenAI-style skill discovery.
 
-- A host-adaptive debugging workflow in [`SKILL.md`](./SKILL.md)
+## What You Get
+
+- A reusable `debug` skill that forces hypothesis-driven debugging instead of speculative fixes
 - A detailed operator reference in [`references/runtime-debugging.md`](./references/runtime-debugging.md)
-- A bundled local NDJSON log collector with a same-origin dashboard under [`scripts/local_log_collector/`](./scripts/local_log_collector/)
-- Agent metadata for OpenAI-compatible skill registries in [`agents/openai.yaml`](./agents/openai.yaml)
+- A bundled local NDJSON collector and dashboard in [`scripts/local_log_collector/`](./scripts/local_log_collector/)
+- Optional UI metadata for compatible runtimes in [`agents/openai.yaml`](./agents/openai.yaml)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  User["Developer / Operator"] --> Agent["Agent Runtime"]
+  Agent --> Skill["SKILL.md<br/>workflow + guardrails"]
+  Agent --> Ref["runtime-debugging.md<br/>bootstrap + log format"]
+  Agent --> App["Target app under debug"]
+  Agent --> Logs["Temporary instrumentation"]
+  Logs --> Collector["Local NDJSON collector<br/>same-origin dashboard + APIs"]
+  App --> Logs
+  Collector --> File["Session log file"]
+  Collector --> UI["Live dashboard"]
+  File --> Agent
+  UI --> Agent
+  Agent --> Fix["Proven fix + post-fix verification"]
+```
+
+## Why This Exists
+
+Most debugging prompts collapse into code reading, guesses, and defensive patches. This skill pushes the agent into a stricter loop:
+
+1. Generate precise hypotheses.
+2. Attach to or start an authoritative logging session.
+3. Add minimal temporary instrumentation.
+4. Ask for a reproduction run.
+5. Read the log file and mark each hypothesis `CONFIRMED`, `REJECTED`, or `INCONCLUSIVE`.
+6. Apply a fix only after the root cause is proven.
+7. Verify with fresh post-fix logs before removing instrumentation.
+
+That makes the debugging process easier to audit, easier to repeat, and much less likely to ship guesswork.
 
 ## Dashboard Preview
 
 ![Runtime Debug dashboard preview](./docs/images/dashboard-overview.png)
 
-## Why This Exists
-
-Most debugging prompts drift into speculative fixes. This skill pushes the agent toward a stricter loop:
-
-1. Generate concrete hypotheses.
-2. Start or attach to an authoritative logging session.
-3. Add minimal temporary instrumentation.
-4. Reproduce and inspect the recorded log file.
-5. Apply a fix only after the root cause is proven.
-6. Verify with post-fix logs before removing instrumentation.
-
-The result is a debugging workflow that is easier to audit, easier to repeat, and less likely to ship guesswork.
-
 ## What The Skill Enforces
 
-- Evidence-first debugging instead of code-inspection-only fixes
-- Explicit `CONFIRMED` / `REJECTED` / `INCONCLUSIVE` hypothesis tracking
-- Minimal temporary instrumentation with cleanup after verification
-- A local collector service when the host does not already provide logging
-- Clear reproduction requests and before/after verification runs
-- Guardrails against speculative fallback code, stale logs, and leaked debug scaffolding
+- Evidence-first debugging instead of inspection-only reasoning
+- Minimal instrumentation with explicit cleanup after verification
+- Per-hypothesis logging and before/after comparison
+- Local collector bootstrap when the host does not already provide logging
+- Guardrails against stale logs, speculative fallback code, and leaked debug scaffolding
 
-## Requirements
+## Runtime Compatibility
 
-- A Codex-compatible local skill system that reads `SKILL.md`
-- Python 3 available as `python3`, or `python` resolving to Python 3, when using the bundled collector
-- A host runtime that can keep a long-lived process alive during the debugging session
-- Optional browser access for the live dashboard; the collector APIs still work headlessly
+The skill is intentionally portable. You can use it with:
 
-## Repository Layout
+- OpenAI Codex and similar local-skill runtimes
+- Agent shells that read `~/.agents/skills/<name>/SKILL.md`
+- Custom agent frameworks that mount a skill folder and inject `SKILL.md` into context
+- Internal toolchains that want the collector, references, or workflow as reusable assets
 
-```text
-.
-├── SKILL.md
-├── README.md
-├── LICENSE
-├── agents/
-│   └── openai.yaml
-├── references/
-│   └── runtime-debugging.md
-└── scripts/
-    └── local_log_collector/
-        ├── main.py
-        ├── collector_server.py
-        ├── collector_state.py
-        ├── collector_browser.py
-        └── static/
-```
+If your runtime ignores [`agents/openai.yaml`](./agents/openai.yaml), that is fine. The core logic is still fully available through [`SKILL.md`](./SKILL.md).
 
-## Installation
+## Install
 
-Install it as a local skill named `debug`.
+Install the repository as a local skill named `debug`.
 
-### Codex-style skills
+| Runtime | Install path | Notes |
+| --- | --- | --- |
+| Codex-style runtimes | `~/.codex/skills/debug` | Reads `SKILL.md` directly |
+| Agents-style runtimes | `~/.agents/skills/debug` | Common local skill convention |
+| Custom runtimes | Any mounted `debug/` folder | Load `SKILL.md`, optionally parse `agents/openai.yaml` |
 
-```bash
-mkdir -p ~/.codex/skills/debug
-rsync -a ./ ~/.codex/skills/debug/
-```
-
-### Agents-style skills
+Example:
 
 ```bash
 mkdir -p ~/.agents/skills/debug
 rsync -a ./ ~/.agents/skills/debug/
 ```
 
-If your runtime supports skill metadata discovery, keep [`agents/openai.yaml`](./agents/openai.yaml) together with the rest of the repository.
+If your runtime supports metadata discovery, keep [`agents/openai.yaml`](./agents/openai.yaml) together with the rest of the repository.
 
-## Usage
+## How To Invoke It
 
-Invoke the skill by asking the agent to use `$debug` for a bug, regression, flaky behavior, or unclear runtime failure.
+The exact invocation depends on the host:
 
-Example:
+- In runtimes with skill commands or chips, call `debug` or `$debug`
+- In plain-text agent runtimes, tell the agent to load the `debug` skill before investigating the bug
+- In custom frameworks, inject [`SKILL.md`](./SKILL.md) as the active debugging workflow
+
+Example prompts:
 
 ```text
-Use $debug to investigate why the checkout button sometimes stays disabled after the cart updates.
+Use the debug skill to investigate why checkout stays disabled after the cart updates.
 ```
 
-The skill will adapt to the current host, establish a logging session, request a reproduction run, and only propose a fix after the runtime evidence proves the root cause.
+```text
+Load the debug workflow from SKILL.md and debug this flaky save action using runtime evidence.
+```
 
 ## Local Collector
 
-The bundled collector is a zero-dependency Python app built on the standard library. It accepts JSON log events, appends them to an NDJSON file, and exposes:
+The bundled collector is a zero-dependency Python app built on the standard library. It accepts JSON log events, appends them to an NDJSON file, and serves a same-origin dashboard for live inspection.
+
+Endpoints:
 
 - `POST /ingest`
 - `GET /health`
@@ -105,8 +116,6 @@ The bundled collector is a zero-dependency Python app built on the standard libr
 - `GET /api/logs/detail`
 - `POST /api/clear`
 - `POST /api/shutdown`
-
-It also serves a same-origin dashboard for live log inspection.
 
 Minimal smoke test:
 
@@ -120,12 +129,35 @@ python3 scripts/local_log_collector/main.py \
 
 The ready file contains the active endpoint, dashboard URL, log file path, and session metadata.
 
-## Customization
+## Repository Layout
 
-- Edit [`SKILL.md`](./SKILL.md) to change workflow rules, guardrails, or required response shape.
-- Edit [`references/runtime-debugging.md`](./references/runtime-debugging.md) to refine bootstrap commands and logging templates.
-- Edit [`agents/openai.yaml`](./agents/openai.yaml) to tune discovery metadata for your host.
+```text
+.
+├── SKILL.md
+├── README.md
+├── LICENSE
+├── agents/
+│   └── openai.yaml
+├── docs/
+│   └── images/
+│       └── dashboard-overview.png
+├── references/
+│   └── runtime-debugging.md
+└── scripts/
+    └── local_log_collector/
+        ├── main.py
+        ├── collector_server.py
+        ├── collector_state.py
+        ├── collector_browser.py
+        └── static/
+```
+
+## Customize It
+
+- Edit [`SKILL.md`](./SKILL.md) to change workflow rules, guardrails, or response shape
+- Edit [`references/runtime-debugging.md`](./references/runtime-debugging.md) to refine bootstrap commands and logging templates
+- Edit [`agents/openai.yaml`](./agents/openai.yaml) only when you need runtime-specific metadata tweaks
 
 ## License
 
-This repository is released under the [MIT License](./LICENSE).
+Released under the [MIT License](./LICENSE).
