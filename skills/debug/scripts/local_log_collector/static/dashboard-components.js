@@ -90,6 +90,7 @@ export function MobileTabBar({ activeTab, onTabChange, hasDetailUpdate }) {
   const tabs = [
     { key: 'logs', label: 'Logs', icon: html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>` },
     { key: 'detail', label: 'Detail', icon: html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>` },
+    { key: 'locations', label: 'Locations', icon: html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 1 1 18 0Z"/><circle cx="12" cy="10" r="3"/></svg>` },
     { key: 'stats', label: 'Stats', icon: html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>` },
   ]
 
@@ -371,6 +372,210 @@ export function DetailPanel({ detail, isLoading }) {
             : html`
                 <pre className="scroll-thin h-full overflow-auto bg-surface-0 p-3 font-mono text-[11px] leading-5 text-pale whitespace-pre-wrap break-all">${detail.payloadText || 'No payload available.'}</pre>
               `
+        }
+      </div>
+    </div>
+  `
+}
+
+export function LocationsPanel({
+  locations,
+  isLoading,
+  ide,
+  configFile,
+  workspaceRoot,
+  configStatus,
+  openStatus,
+  onSelectIde,
+  onOpenLocation,
+}) {
+  const canOpenSelectedIde = Boolean(ide?.selected && ide?.selectedAvailable)
+  const statusText = openStatus?.text
+    || configStatus?.text
+    || (ide?.selected && ide?.selectedAvailable === false
+      ? 'Selected IDE is unavailable. Pick another launcher.'
+      : '')
+  const statusKind = openStatus?.kind
+    || configStatus?.kind
+    || (ide?.selected && ide?.selectedAvailable === false ? 'error' : '')
+  const statusDisplayText = statusText || 'Ready to open source.'
+
+  return html`
+    <div className="flex h-full min-h-0 flex-col bg-surface-0">
+      <div className="border-b border-border bg-surface-1 px-3 py-2">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-2xs font-mono font-semibold uppercase tracking-wider text-ghost">Source Locations</div>
+            <div className="mt-1 text-xs text-pale">${locations.length} active log points</div>
+          </div>
+          <div className="min-w-[140px]">
+            <label className="mb-1 block text-[9px] font-mono uppercase tracking-wider text-ghost">Open With</label>
+            <select
+              className="w-full rounded border border-border bg-surface-2 px-2 py-1 text-xs text-pale"
+              value=${ide?.selected || ''}
+              onChange=${(event) => onSelectIde(event.target.value)}
+            >
+              ${!ide?.selected ? html`<option value="">Select IDE</option>` : null}
+              ${(ide?.options || []).map((option) => html`
+                <option key=${option.id} value=${option.id}>
+                  ${option.label}${option.available ? '' : ' (Unavailable)'}
+                </option>
+              `)}
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-2 space-y-1 text-[10px] font-mono text-ghost">
+          <div>
+            source: <span className="text-pale">${ide?.selectedSource || 'none'}</span>
+          </div>
+          ${configFile ? html`
+            <div className="truncate">
+              config: <span className="text-pale">${configFile}</span>
+            </div>
+          ` : null}
+          ${workspaceRoot ? html`
+            <div className="truncate">
+              root: <span className="text-pale">${workspaceRoot}</span>
+            </div>
+          ` : null}
+          <div
+            className="flex min-h-4 min-w-0 items-center gap-1.5 leading-4"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="shrink-0 text-ghost">status:</span>
+            <span
+              className=${cx(
+                'min-w-0 flex-1 truncate',
+                statusKind === 'error'
+                  ? 'text-danger'
+                  : statusKind === 'busy'
+                    ? 'text-warn'
+                    : statusText
+                      ? 'text-accent'
+                      : 'text-pale',
+              )}
+              title=${statusDisplayText}
+            >
+              ${statusDisplayText}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="scroll-thin flex-1 overflow-auto p-2">
+        ${isLoading && !locations.length
+          ? html`
+              <div className="flex h-full items-center justify-center text-xs font-mono text-ghost">
+                Loading locations...
+              </div>
+            `
+          : locations.length
+            ? locations.map((location) => html`
+                <button
+                  key=${location.location}
+                  className="location-row mb-2 w-full rounded border border-border bg-surface-1 px-3 py-2 text-left last:mb-0 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled=${!location.openable || !canOpenSelectedIde}
+                  onClick=${() => onOpenLocation(location.location)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-xs text-bright">${location.displayPath || location.location}</div>
+                      <div className="mt-1 text-[10px] font-mono text-ghost">
+                        line ${location.line ?? 'N/A'}${location.column != null ? `:${location.column}` : ''}
+                      </div>
+                    </div>
+                    <div className="shrink-0 rounded border border-accent/20 bg-accent/10 px-2 py-0.5 font-mono text-[10px] text-accent">
+                      ${location.count}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-mono text-ghost">
+                    <span>last ${formatDateTime(location.lastTimestamp)}</span>
+                    <span>${location.withinWorkspace ? (location.exists ? 'file ok' : 'file missing') : 'outside root'}</span>
+                  </div>
+
+                  ${location.runIds?.length ? html`
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      ${location.runIds.map((runId) => html`
+                        <span key=${`${location.location}-run-${runId}`} className="rounded border border-accent/20 bg-accent/10 px-1.5 py-px font-mono text-[9px] text-accent">
+                          ${runId}
+                        </span>
+                      `)}
+                    </div>
+                  ` : null}
+
+                  ${location.hypothesisIds?.length ? html`
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      ${location.hypothesisIds.map((hypothesisId) => html`
+                        <span key=${`${location.location}-hypothesis-${hypothesisId}`} className="rounded border border-warn/20 bg-warn/10 px-1.5 py-px font-mono text-[9px] text-warn">
+                          ${hypothesisId}
+                        </span>
+                      `)}
+                    </div>
+                  ` : null}
+                </button>
+              `)
+            : html`
+                <div className="flex h-full items-center justify-center text-xs font-mono text-ghost">
+                  Waiting for instrumented locations...
+                </div>
+              `
+        }
+      </div>
+    </div>
+  `
+}
+
+export function InspectorPanel({
+  activeTab,
+  onTabChange,
+  detail,
+  detailLoading,
+  locations,
+  locationsLoading,
+  ide,
+  configFile,
+  workspaceRoot,
+  configStatus,
+  openStatus,
+  onSelectIde,
+  onOpenLocation,
+}) {
+  return html`
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-0 border-b border-border bg-surface-1 shrink-0">
+        <button
+          className=${cx('tab-btn px-3 py-1.5 text-2xs font-mono font-semibold uppercase tracking-wider border-b-2 border-transparent', activeTab === 'detail' ? '' : 'text-ghost hover:text-pale')}
+          data-active=${activeTab === 'detail' ? 'true' : 'false'}
+          onClick=${() => onTabChange('detail')}
+        >Entry</button>
+        <button
+          className=${cx('tab-btn px-3 py-1.5 text-2xs font-mono font-semibold uppercase tracking-wider border-b-2 border-transparent', activeTab === 'locations' ? '' : 'text-ghost hover:text-pale')}
+          data-active=${activeTab === 'locations' ? 'true' : 'false'}
+          onClick=${() => onTabChange('locations')}
+        >Locations</button>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-hidden">
+        ${activeTab === 'locations'
+          ? html`
+              <${LocationsPanel}
+                locations=${locations}
+                isLoading=${locationsLoading}
+                ide=${ide}
+                configFile=${configFile}
+                workspaceRoot=${workspaceRoot}
+                configStatus=${configStatus}
+                openStatus=${openStatus}
+                onSelectIde=${onSelectIde}
+                onOpenLocation=${onOpenLocation}
+              />
+            `
+          : html`
+              <${DetailPanel} detail=${detail} isLoading=${detailLoading} />
+            `
         }
       </div>
     </div>

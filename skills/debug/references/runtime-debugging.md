@@ -8,6 +8,8 @@ Use this reference when the debugging task needs exact logging, local collector 
 - Active logging session
 - Reusing or restarting the logging process
 - Preferred local collector bootstrap
+- Location state file
+- IDE config and source opening
 - Refreshing stale collector ports in existing log code
 - Dashboard and operator APIs
 - CORS behavior
@@ -77,8 +79,11 @@ Prefer this order:
    - Log path
    - Session ID
    - Ready file
-2. Otherwise resolve a local Python 3 interpreter and start the bundled local collector service first. It should own the current session's NDJSON log file, expose the dashboard and operator APIs from the same origin, and its ready file becomes the source of truth for endpoint, log path, dashboard URL, session ID, and owned temporary artifacts.
+   - Location-state file
+2. Otherwise resolve a local Python 3 interpreter and start the bundled local collector service first. It should own the current session's NDJSON log file plus the sidecar location-state JSON file, expose the dashboard and operator APIs from the same origin, and its ready file becomes the source of truth for endpoint, log path, location-state file path, dashboard URL, session ID, workspace root, config file path, and owned temporary artifacts.
 3. If no Python 3 interpreter is available, if the logging system is explicitly unavailable, or if the local collector failed to start, stop and tell the user you cannot proceed with evidence-first debugging in the configured mode unless they provide an authoritative logging session or a local Python 3 runtime.
+
+If a reused authoritative session does not expose `syncLocationsUrl` or another writable location-state mechanism, keep debugging with log evidence only. Do not block the task on dashboard `Locations` browsing or IDE-opening features that session cannot support.
 
 When the bundled collector provides dashboard auto-open fields in the ready file, treat them as authoritative:
 
@@ -127,8 +132,11 @@ If this check fails, stop and tell the user you need either an authoritative log
 mkdir -p .debug-logs
 "$PYTHON_BIN" <SKILL_ROOT>/scripts/local_log_collector/main.py \
   --log-file "$PWD/.debug-logs/<SESSION_ID>.ndjson" \
+  --location-state-file "$PWD/.debug-logs/<SESSION_ID>.locations.json" \
   --ready-file "$PWD/.debug-logs/<SESSION_ID>.json" \
   --session-id "<SESSION_ID>" \
+  --workspace-root "$PWD" \
+  --default-ide "<IDE_ID>" \
   --service-log-file "$PWD/.debug-logs/<SESSION_ID>.service.log" \
   > "$PWD/.debug-logs/<SESSION_ID>.service.log" 2>&1
 ```
@@ -139,13 +147,16 @@ In a normal terminal that preserves detached children, you can still daemonize i
 mkdir -p .debug-logs
 nohup "$PYTHON_BIN" <SKILL_ROOT>/scripts/local_log_collector/main.py \
   --log-file "$PWD/.debug-logs/<SESSION_ID>.ndjson" \
+  --location-state-file "$PWD/.debug-logs/<SESSION_ID>.locations.json" \
   --ready-file "$PWD/.debug-logs/<SESSION_ID>.json" \
   --session-id "<SESSION_ID>" \
+  --workspace-root "$PWD" \
+  --default-ide "<IDE_ID>" \
   --service-log-file "$PWD/.debug-logs/<SESSION_ID>.service.log" \
   > "$PWD/.debug-logs/<SESSION_ID>.service.log" 2>&1 &
 ```
 
-Resolve `<SKILL_ROOT>` to the installed debug skill directory before running the command. Generate `<SESSION_ID>` from the task plus a timestamp, for example `checkout-bug-1733456789000`. The collector attempts to open the dashboard in the default browser automatically unless you pass `--no-open-dashboard`. After the service starts, read the ready file and reuse the returned values exactly, including the dashboard auto-open result, `serviceLogFile`, and `ownedArtifacts`.
+Resolve `<SKILL_ROOT>` to the installed debug skill directory before running the command. Generate `<SESSION_ID>` from the task plus a timestamp, for example `checkout-bug-1733456789000`. Set `--workspace-root` to the repository root that relative `location` fields should resolve against. If you omit `--location-state-file`, the collector derives `<SESSION_ID>.locations.json` next to the ready file when a ready file exists, otherwise next to the NDJSON log file. Use `--default-ide` only as a fallback when `~/.junerdd/config.json` does not already specify one. The collector attempts to open the dashboard in the default browser automatically unless you pass `--no-open-dashboard`. After the service starts, read the ready file and reuse the returned values exactly, including the dashboard auto-open result, `locationStateFile`, `serviceLogFile`, and `ownedArtifacts`.
 
 If you are operating inside an agent runtime that has its own browser automation or embedded browser, do not open `dashboardUrl` there when the ready file reports `dashboardOpenSucceeded: true`, because that would duplicate the same page open. Only fall back to MCP or an embedded browser for the collector dashboard when the ready file reports `dashboardOpenSucceeded: false` or `dashboardOpenAttempted: false`. Do not open target-app pages unless the user explicitly asked you to open the project. If the host has no browser access, continue with the ready file values plus `GET /api/state`, `GET /health`, `POST /api/clear`, and `POST /api/shutdown`.
 
@@ -155,7 +166,9 @@ Ready file example:
 {
   "endpoint": "http://127.0.0.1:43125/ingest",
   "dashboardUrl": "http://127.0.0.1:43125/",
+  "dashboardToken": "<SESSION_SCOPED_TOKEN>",
   "stateUrl": "http://127.0.0.1:43125/api/state",
+  "syncLocationsUrl": "http://127.0.0.1:43125/api/locations/sync",
   "clearUrl": "http://127.0.0.1:43125/api/clear",
   "shutdownUrl": "http://127.0.0.1:43125/api/shutdown",
   "healthUrl": "http://127.0.0.1:43125/health",
@@ -165,20 +178,134 @@ Ready file example:
   "host": "127.0.0.1",
   "port": 43125,
   "logFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.ndjson",
+  "locationStateFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.locations.json",
   "serviceLogFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.service.log",
   "readyFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.json",
   "ownedArtifacts": [
     "/abs/path/.debug-logs/checkout-bug-1733456789000.ndjson",
+    "/abs/path/.debug-logs/checkout-bug-1733456789000.locations.json",
     "/abs/path/.debug-logs/checkout-bug-1733456789000.json",
     "/abs/path/.debug-logs/checkout-bug-1733456789000.service.log"
   ],
   "sessionId": "checkout-bug-1733456789000",
+  "workspaceRoot": "/abs/path/to/workspace",
+  "configFile": "/Users/example/.junerdd/config.json",
   "pid": 12345,
   "startedAt": 1733456789000
 }
 ```
 
 Keep the collector running through the initial reproduction and the post-fix verification run. Stop it only after the debugging session is complete.
+
+## Location state file
+
+The bundled collector maintains a sidecar JSON file that mirrors the current instrumentation locations in real time. Update expectations:
+
+- Treat explicitly synced instrumentation locations as the source of truth for which temporary log points are currently active.
+- Merge runtime evidence from accepted ingest events onto those tracked locations so counts and last-seen metadata stay useful.
+- Refresh it on startup after hydrating an existing NDJSON log and reloading any previously synced tracked locations.
+- Refresh it after every accepted ingest.
+- Refresh it after every location sync.
+- Refresh it after every clear operation so runtime counters reset without losing the active source locations.
+- Treat the file path in `locationStateFile` as authoritative when the session provides one.
+
+The file is intended to answer "which temporary log points are currently active?" without rescanning the whole NDJSON file. `trackedLocations` is the authoritative active set that the agent syncs after instrumentation edits. `locations` is the per-location view for that same active set, with runtime counts from the NDJSON session merged onto the currently tracked rows. Removed log points should disappear from `locations` as soon as the next sync replaces the active set, even if older NDJSON entries still mention them. Use this shape:
+
+```json
+{
+  "sessionId": "checkout-bug-1733456789000",
+  "logFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.ndjson",
+  "locationStateFile": "/abs/path/.debug-logs/checkout-bug-1733456789000.locations.json",
+  "fileUpdatedAt": 1733456789000,
+  "invalidLines": 0,
+  "updatedAt": 1733456789001,
+  "totalEntries": 3,
+  "uniqueLocations": 2,
+  "trackedLocationCount": 2,
+  "lastEntry": {
+    "entryIndex": 2,
+    "lineNumber": 3,
+    "runId": "initial",
+    "hypothesisId": "B",
+    "location": "src/cart.ts:118",
+    "message": "after response",
+    "sessionId": "checkout-bug-1733456789000",
+    "timestamp": 1733456789000
+  },
+  "trackedLocations": [
+    {
+      "location": "src/cart.ts:118",
+      "hypothesisIds": ["A", "B"],
+      "registeredAt": 1733456788000,
+      "updatedAt": 1733456789000
+    }
+  ],
+  "locations": [
+    {
+      "location": "src/cart.ts:118",
+      "count": 2,
+      "lastTimestamp": 1733456789000,
+      "lastEntryIndex": 2,
+      "lastLineNumber": 3,
+      "runIds": ["initial"],
+      "hypothesisIds": ["A", "B"],
+      "tracked": true,
+      "registeredAt": 1733456788000,
+      "updatedAt": 1733456789000
+    }
+  ]
+}
+```
+
+The dashboard's `Locations` tab should read this data through `GET /api/locations`, not by opening the JSON file directly in frontend code. The API enriches each record with resolved absolute paths, existence checks, and whether the location is currently openable.
+
+When the current session exposes `syncLocationsUrl`, sync the collector immediately with the full active source-location set after inserting, moving, or deleting temporary logs and before asking for reproduction:
+
+```bash
+curl -X POST "<SYNC_LOCATIONS_URL>" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Debug-Dashboard-Token: <DASHBOARD_TOKEN>' \
+  --data '{
+    "locations": [
+      {"location": "src/cart.ts:118", "hypothesisIds": ["A"]},
+      {"location": "src/cart.ts:141", "hypothesisIds": ["B"]}
+    ]
+  }'
+```
+
+Use replace semantics: send the entire current set of active temporary log locations each time so removed log points disappear from the sidecar state as soon as the code changes. Each synced location must stay relative to `workspaceRoot`, include a line number, and resolve to an existing source file inside the workspace; the collector rejects invalid, absolute, missing-file, or out-of-root records at sync time.
+
+If the current session does not expose `syncLocationsUrl` or another writable location-state mechanism, keep `location` populated in the log payloads and continue without collector-managed active-location state for that session.
+
+## IDE config and source opening
+
+The collector stores IDE preferences in `~/.junerdd/config.json`. Keep the file extensible by nesting debug-collector settings under their own object instead of using flat top-level keys. Use this shape:
+
+```json
+{
+  "debug": {
+    "collector": {
+      "ide": {
+        "selected": "cursor"
+      }
+    }
+  }
+}
+```
+
+Rules:
+
+- Preserve unrelated keys in `~/.junerdd/config.json` when updating the selected IDE.
+- If `~/.junerdd/config.json` is unreadable, invalid JSON, or not a JSON object, surface that error and refuse writes until the file is repaired. Do not overwrite a broken config with partial data.
+- Treat `debug.collector.ide.selected` as the authoritative stored preference when it exists.
+- Use the collector's `--default-ide` only when that config key is absent.
+- If the configured `--default-ide` is unavailable, fall back to the first available IDE instead of exposing a dead default choice.
+- Expose the config path and supported IDE options from `GET /api/config` so the dashboard can render the current selection without touching the filesystem directly.
+- Update the config through `POST /api/config` by writing only `debug.collector.ide.selected`. Do not accept arbitrary root-level merge patches from the dashboard.
+- Route dashboard clicks through `POST /api/open-location` so the browser never needs to know the local editor command line.
+- If the stored IDE is unsupported or unavailable, show that state in the dashboard and disable source-opening actions until the selection is fixed.
+
+`POST /api/open-location` should parse `location`, resolve relative paths against `workspaceRoot`, and open the file in the configured IDE at the logged source line. Reject absolute paths or `..` traversals that resolve outside `workspaceRoot`. Prefer editor CLI launchers when available. For VS Code-family editors and JetBrains apps on macOS, allow an application-bundle fallback when the shell launcher is missing. When the launcher exits `0` during the synchronous handoff, return `launchStatus: "confirmed"`; when the process is still running after the short handoff window, return `launchStatus: "requested"` so the caller does not mistake a best-effort launch request for confirmed editor success.
 
 ## Refreshing stale collector ports in existing log code
 
@@ -187,8 +314,9 @@ When a restarted collector comes back on a different port, update the existing t
 Prefer this order:
 
 1. Read the new ready file and capture the new `endpoint` exactly.
-2. Search only the active debug instrumentation for stale collector URLs or endpoint constants.
-3. Patch those temporary logging regions to use the new endpoint before asking for the next reproduction.
+2. Check the current `locationStateFile` first when it exists so you can restrict the search to files that still contain active temporary logs.
+3. Search only the active debug instrumentation for stale collector URLs or endpoint constants.
+4. Patch those temporary logging regions to use the new endpoint before asking for the next reproduction.
 
 Useful search patterns:
 
@@ -211,24 +339,26 @@ The bundled service attempts to open `dashboardUrl` in a browser by default. Pas
 - File size and last update time
 - Count breakdowns by `runId` and `hypothesisId`
 - The latest parsed log event
+- A `Locations` tab that lists active temporary log points and opens them through the configured IDE
 
 The same service also exposes:
 
 - `GET /api/state` for live summary data
+- `POST /api/locations/sync` to replace the active temporary log-point list
 - `POST /api/clear` to truncate the current session log file
 - `POST /api/shutdown` to stop the collector after the response returns
 
-Both the ready file and `GET /api/state` include `serviceLogFile` plus an `ownedArtifacts` list. When you started the bundled collector yourself, treat that artifact list as the authoritative cleanup target after the debug session succeeds.
+Both the ready file and `GET /api/state` include `locationStateFile`, `serviceLogFile`, an `ownedArtifacts` list, a session-scoped `dashboardToken`, and the sync URL for active locations. When you started the bundled collector yourself, treat that artifact list as the authoritative cleanup target after the debug session succeeds, and use the returned `dashboardToken` for mutating operator calls. Browser-initiated dashboard calls must stay same-origin. Local agent or CLI calls may omit `Origin` when they already hold the session token.
 
 ## CORS behavior
 
 The bundled collector must not introduce browser CORS issues:
 
 - Serve the dashboard from the same collector origin so UI actions stay same-origin.
-- Answer `OPTIONS` preflight requests on the ingest and operator endpoints.
-- Return `Access-Control-Allow-Origin: *`.
-- Return `Access-Control-Allow-Headers: Content-Type, X-Debug-Session-Id`.
-- Return `Access-Control-Allow-Methods: GET, POST, OPTIONS`.
+- Answer `OPTIONS` preflight requests for `/ingest`.
+- Return wildcard CORS headers only for `/ingest`, with `Access-Control-Allow-Headers: Content-Type, X-Debug-Session-Id` and `Access-Control-Allow-Methods: POST, OPTIONS`.
+- Keep dashboard/operator APIs same-origin from the browser. Do not return wildcard CORS headers for `POST /api/locations/sync`, `POST /api/clear`, `POST /api/shutdown`, `POST /api/config`, or `POST /api/open-location`.
+- Require the session-scoped `X-Debug-Dashboard-Token` header on mutating requests so random webpages cannot clear logs, rewrite config, or trigger local IDE opens. When a browser sends an `Origin`, reject it unless it matches the collector origin. Local non-browser callers may omit `Origin`.
 
 This collector behavior exists so browser/client instrumentation can post directly to the collector from frontend apps, including Next.js dev apps. Do not add project-local proxy routes such as `/api/_dev/*` unless you have already proven that direct browser delivery is blocked in the current host.
 
@@ -239,6 +369,7 @@ Before each reproduction run or any deliberate re-recording pass, clear only the
 ```bash
 curl -X POST "<CLEAR_URL>" \
   -H 'Content-Type: application/json' \
+  -H 'X-Debug-Dashboard-Token: <DASHBOARD_TOKEN>' \
   --data '{}'
 ```
 
@@ -256,7 +387,7 @@ Only delete artifacts you own.
 
 - If the logging session was provided by the host, another tool, or the user, do not delete its files.
 - If you started the bundled collector for the current task, stop it after post-fix verification succeeds and after any final evidence handoff the user still needs.
-- Then delete every path listed in `ownedArtifacts`, which should include the session NDJSON log, ready file, and service log.
+- Then delete every path listed in `ownedArtifacts`, which should include the session NDJSON log, location-state file, ready file, and service log.
 - If the scratch directory becomes empty after that deletion, remove it too.
 
 One safe pattern is:
@@ -310,7 +441,7 @@ Prefer NDJSON with one JSON object per line. Use this payload shape:
 }
 ```
 
-Omit `sessionId` and any session header only when the session explicitly says no session ID is available.
+Populate `location` with the actual file and line for the injected log. The collector uses that field to maintain the sidecar location-state JSON. Omit `sessionId` and any session header only when the session explicitly says no session ID is available.
 
 ## JavaScript / TypeScript template
 

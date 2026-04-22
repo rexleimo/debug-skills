@@ -1,6 +1,6 @@
 import { createRoot, html, useCallback, useEffect, useMemo, useRef, useState } from './dashboard-deps.js'
 import {
-  DetailPanel,
+  InspectorPanel,
   LogPanel,
   MetricBar,
   MobileTabBar,
@@ -8,7 +8,13 @@ import {
   StoppedOverlay,
   Toolbar,
 } from './dashboard-components.js'
-import { useCollectorState, useEntryDetail, useVirtualLogs } from './dashboard-hooks.js'
+import {
+  useCollectorConfig,
+  useCollectorState,
+  useEntryDetail,
+  useLocationState,
+  useVirtualLogs,
+} from './dashboard-hooks.js'
 import { METRICS } from './dashboard-utils.js'
 
 function App() {
@@ -16,6 +22,7 @@ function App() {
   const totalEntries = summary?.totalEntries ?? 0
   const [selectedEntryId, setSelectedEntryId] = useState(null)
   const [mobileTab, setMobileTab] = useState('logs')
+  const [inspectorTab, setInspectorTab] = useState('detail')
   const [hasDetailUpdate, setHasDetailUpdate] = useState(false)
   const activeEntryId = totalEntries > 0 ? selectedEntryId : null
 
@@ -37,6 +44,21 @@ function App() {
 
   const { parentRef, rows, virtualizer, entryMap, loading } = useVirtualLogs(totalEntries, logsVersion, service?.logsUrl)
   const { detail, isLoading } = useEntryDetail(activeEntryId, logsVersion, service?.logDetailUrl)
+  const {
+    configFile,
+    ide,
+    error: configError,
+    actionStatus: configActionStatus,
+    setSelectedIde,
+  } = useCollectorConfig(service?.configUrl, service?.dashboardToken)
+  const {
+    locations,
+    workspaceRoot,
+    error: locationsError,
+    actionStatus: openActionStatus,
+    openLocation,
+    isLoading: locationsLoading,
+  } = useLocationState(service?.locationsUrl, service?.openLocationUrl, service?.dashboardToken)
   const runCounts = summary?.runCounts ?? []
   const hypothesisCounts = summary?.hypothesisCounts ?? []
   const metrics = useMemo(
@@ -48,6 +70,7 @@ function App() {
     setSelectedEntryId(entryIndex)
     if (isMobileRef.current) {
       setMobileTab('detail')
+      setInspectorTab('detail')
       setHasDetailUpdate(false)
     }
   }, [])
@@ -60,7 +83,20 @@ function App() {
 
   const handleTabChange = useCallback((tab) => {
     setMobileTab(tab)
+    if (tab === 'detail' || tab === 'locations') {
+      setInspectorTab(tab)
+    }
     if (tab === 'detail') setHasDetailUpdate(false)
+  }, [])
+
+  const handleInspectorTabChange = useCallback((tab) => {
+    setInspectorTab(tab)
+    if (isMobileRef.current) {
+      setMobileTab(tab)
+    }
+    if (tab === 'detail') {
+      setHasDetailUpdate(false)
+    }
   }, [])
 
   // On mobile, each panel is shown/hidden via CSS class.
@@ -138,9 +174,23 @@ function App() {
 
         <!-- Right: Detail tab -->
         <aside
-          className=${`shrink-0 min-h-0 flex flex-col xl:w-[320px] 2xl:w-[380px] xl:border-l xl:border-border ${mobileTab === 'detail' ? 'flex-1' : 'hidden xl:flex'}`}
+          className=${`shrink-0 min-h-0 flex flex-col xl:w-[320px] 2xl:w-[380px] xl:border-l xl:border-border ${mobileTab === 'detail' || mobileTab === 'locations' ? 'flex-1' : 'hidden xl:flex'}`}
         >
-          <${DetailPanel} detail=${detail} isLoading=${isLoading} />
+          <${InspectorPanel}
+            activeTab=${inspectorTab}
+            onTabChange=${handleInspectorTabChange}
+            detail=${detail}
+            detailLoading=${isLoading}
+            locations=${locations}
+            locationsLoading=${locationsLoading}
+            ide=${ide}
+            configFile=${configFile}
+            workspaceRoot=${workspaceRoot}
+            configStatus=${configError ? { kind: 'error', text: configError } : configActionStatus}
+            openStatus=${locationsError ? { kind: 'error', text: locationsError } : openActionStatus}
+            onSelectIde=${setSelectedIde}
+            onOpenLocation=${(location) => openLocation(location, ide?.selected)}
+          />
         </aside>
 
       </div>

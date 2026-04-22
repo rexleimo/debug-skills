@@ -35,10 +35,14 @@ export function useCollectorState() {
     return () => clearTimeout(timer)
   }, [stopped, shutdownComplete])
 
-  async function invoke(url, successMessage, stopAfter = false) {
+  async function invoke(url, successMessage, stopAfter = false, dashboardToken = '') {
     setActionStatus({ kind: 'busy', text: 'Working...' })
     try {
-      const nextState = await fetchJson(url, { method: 'POST', body: '{}' })
+      const nextState = await fetchJson(url, {
+        method: 'POST',
+        headers: { 'X-Debug-Dashboard-Token': dashboardToken },
+        body: '{}',
+      })
       setActionStatus({ kind: 'ok', text: successMessage })
       if (stopAfter) {
         setStopped(true)
@@ -60,8 +64,8 @@ export function useCollectorState() {
     status,
     logsVersion,
     actionStatus,
-    clearLogs: () => invoke(service?.clearUrl ?? API_ROUTES.clear, 'Log cleared.'),
-    shutdown: () => invoke(service?.shutdownUrl ?? API_ROUTES.shutdown, 'Shutting down.', true),
+    clearLogs: () => invoke(service?.clearUrl ?? API_ROUTES.clear, 'Log cleared.', false, service?.dashboardToken),
+    shutdown: () => invoke(service?.shutdownUrl ?? API_ROUTES.shutdown, 'Shutting down.', true, service?.dashboardToken),
   }
 }
 
@@ -185,4 +189,100 @@ export function useCollapsible(defaultOpen = true) {
   const [open, setOpen] = useState(defaultOpen)
   const toggle = useCallback(() => setOpen((v) => !v), [])
   return { open, toggle }
+}
+
+export function useCollectorConfig(configUrl = API_ROUTES.config, dashboardToken = '') {
+  const [actionStatus, setActionStatus] = useState(null)
+  const { data, error, mutate } = useSWR(
+    configUrl || null,
+    (url) => fetchJson(url),
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    },
+  )
+
+  const setSelectedIde = useCallback(async (selectedIde) => {
+    if (!configUrl) return
+    setActionStatus({ kind: 'busy', text: 'Saving IDE...' })
+    try {
+      const nextConfig = await fetchJson(configUrl, {
+        method: 'POST',
+        headers: { 'X-Debug-Dashboard-Token': dashboardToken },
+        body: JSON.stringify({ selectedIde }),
+      })
+      setActionStatus({ kind: 'ok', text: 'IDE saved.' })
+      await mutate(nextConfig, { revalidate: false })
+    } catch (nextError) {
+      setActionStatus({
+        kind: 'error',
+        text: nextError.message || 'Failed to save IDE.',
+      })
+    }
+  }, [configUrl, dashboardToken, mutate])
+
+  return {
+    configFile: data?.configFile || '',
+    ide: data?.ide || { selected: '', selectedAvailable: false, selectedSource: 'none', options: [] },
+    error: data?.configError || (error ? error.message || 'Failed to load config.' : ''),
+    actionStatus,
+    setSelectedIde,
+  }
+}
+
+export function useLocationState(
+  locationsUrl = API_ROUTES.locations,
+  openLocationUrl = API_ROUTES.openLocation,
+  dashboardToken = '',
+) {
+  const [actionStatus, setActionStatus] = useState(null)
+  const { data, error } = useSWR(
+    locationsUrl || null,
+    (url) => fetchJson(url),
+    {
+      refreshInterval: 1000,
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    },
+  )
+
+  const openLocation = useCallback(async (location, ide) => {
+    if (!openLocationUrl) return
+    setActionStatus({ kind: 'busy', text: 'Opening...' })
+    try {
+      const payload = {
+        location,
+      }
+      if (ide) {
+        payload.ide = ide
+      }
+      const response = await fetchJson(openLocationUrl, {
+        method: 'POST',
+        headers: { 'X-Debug-Dashboard-Token': dashboardToken },
+        body: JSON.stringify(payload),
+      })
+      const resolvedLocation = response?.location?.displayPath || response?.location?.location || location
+      const launchStatus = response?.launchStatus === 'requested' ? 'requested' : 'confirmed'
+      setActionStatus({
+        kind: 'ok',
+        text: launchStatus === 'requested'
+          ? `Launch requested for ${resolvedLocation}`
+          : `Opened ${resolvedLocation}`,
+      })
+    } catch (nextError) {
+      setActionStatus({
+        kind: 'error',
+        text: nextError.message || 'Failed to open location.',
+      })
+    }
+  }, [dashboardToken, openLocationUrl])
+
+  return {
+    locations: data?.locations || [],
+    workspaceRoot: data?.workspaceRoot || '',
+    isLoading: !data && !error,
+    error: error ? error.message || 'Failed to load locations.' : '',
+    actionStatus,
+    openLocation,
+  }
 }
