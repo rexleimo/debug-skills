@@ -1,6 +1,6 @@
 ---
 name: debug
-description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation, especially for browser or frontend issues where logs should go directly to the active collector endpoint instead of app-local proxy APIs.
+description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, tracking active log locations in a sidecar JSON file, using the collector dashboard to inspect those locations and open source through the configured IDE, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation, especially for browser or frontend issues where logs should go directly to the active collector endpoint instead of app-local proxy APIs.
 ---
 
 # Debug
@@ -11,7 +11,8 @@ Use runtime evidence before changing behavior. Treat code reading as context bui
 
 Before starting, normalize the current debugging environment without preflighting the target app:
 
-- Determine whether the session already exposes a logging endpoint, log path, session ID, ready file, or other authoritative debug configuration.
+- Determine whether the session already exposes a logging endpoint, log path, session ID, ready file, location-state file, or other authoritative debug configuration.
+- Determine whether the active session also exposes location-sync support such as `syncLocationsUrl` or a writable location-state file. If it does not, keep collecting runtime evidence and treat dashboard `Locations` browsing plus IDE-opening features as unavailable for that session instead of blocking the debug pass.
 - If no authoritative logging configuration exists, determine whether a local Python 3 interpreter is available for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If no Python 3 interpreter is available, stop and tell the user you need either an existing logging session or a local Python 3 runtime before continuing in evidence-first mode.
 - Determine how the host keeps long-lived processes alive: persistent PTY, detached shell, task runner, or no background support.
 - Determine whether the host can open or automate browser pages. If not, rely on the collector's ready file and HTTP APIs instead of UI inspection. When browser access exists, reserve page opening for the collector dashboard by default; do not open target-app pages unless the user explicitly asked you to open the project.
@@ -23,8 +24,8 @@ Before starting, normalize the current debugging environment without preflightin
 ## Workflow
 
 1. Generate 3-5 precise hypotheses about why the bug happens. Make them specific enough that a log can confirm or reject each one.
-2. Establish the active logging session before editing app code or probing the target app. If the session already provides a logging endpoint, log path, session ID, or ready file, use those values exactly. Otherwise first resolve a local Python 3 interpreter for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If no Python 3 interpreter is available, stop and tell the user you cannot proceed in this evidence-first mode unless they provide an authoritative logging session or make Python 3 available. When a Python 3 interpreter is available, start the bundled local collector app from `scripts/local_log_collector/main.py`, resolved relative to this skill's root directory, create a session-specific NDJSON log file, and treat the service's ready file as authoritative. If the command runner reaps child processes when the command returns, keep the collector alive in a persistent PTY or the host's equivalent long-lived session mechanism instead of assuming a plain trailing `&` is enough. The bundled service attempts to open its `dashboardUrl` in the system browser by default for live summary, log clearing, and service shutdown controls. If the ready file reports that this browser-open attempt succeeded, do not also open the same page with MCP or browser automation. Only fall back to MCP or an embedded browser when the ready file reports that the auto-open attempt failed, or when auto-open was intentionally disabled.
-3. Add the minimum instrumentation needed to test all hypotheses in parallel. Prefer 2-6 logs; never skip instrumentation; do not exceed 10 logs. When instrumenting browser/client JavaScript, send logs directly to the active collector endpoint unless runtime evidence proves direct delivery is blocked in the current host.
+2. Establish the active logging session before editing app code or probing the target app. Reuse any authoritative logging configuration exactly, including whether the current session supports location tracking. If no authoritative session exists, resolve Python 3, start the bundled collector from `scripts/local_log_collector/main.py`, and adopt its ready-file values. For exact bootstrap commands, ready-file fields, dashboard-opening rules, and teardown metadata, read [runtime-debugging.md](./references/runtime-debugging.md).
+3. Add the minimum instrumentation needed to test all hypotheses in parallel. Prefer 2-6 logs; never skip instrumentation; do not exceed 10 logs. When instrumenting browser/client JavaScript, send logs directly to the active collector endpoint unless runtime evidence proves direct delivery is blocked in the current host. When the current session supports location tracking, sync the current active source-location set after instrumentation edits and before reproduction. For exact sync payload and validation rules, read [runtime-debugging.md](./references/runtime-debugging.md).
 4. Before each reproduction run or deliberate re-recording pass, verify that the current logging process is still alive. Prefer the active `healthUrl` or `stateUrl` when one exists. If the process has been closed or the check fails, start a new collector process and treat its new ready file values as authoritative before continuing.
 5. If restarting the collector changed the active ingest endpoint or port, update the existing temporary logging code so it no longer points at the stale port. Apply that refresh before the next reproduction run and keep the edits limited to the active debug instrumentation for the current task.
 6. Preserve any evidence you still need from the current run, then clear only the active session's existing logs so the next run starts from a low-noise baseline. Prefer the active clear endpoint when one exists; fall back to truncating the active session log file only when no clear endpoint is available.
@@ -36,7 +37,7 @@ Before starting, normalize the current debugging environment without preflightin
 12. Clear only the active session's current logs again so before/after evidence does not mix.
 13. Ask for a post-fix reproduction run and compare before/after logs. Use the same handoff rules in [runtime-debugging.md](./references/runtime-debugging.md), then wait for the user's completion signal before continuing.
 14. Remove all injected temporary logging code only after logs prove the fix worked and the user confirms the issue is gone. This includes the inserted log calls, debug-only endpoint constants, temporary headers, and any other scaffolding added only for this debugging pass.
-15. If you started the bundled collector for this task, stop it and delete the session artifacts it owns after any final evidence handoff. Use the collector metadata as authoritative: remove the active session's NDJSON log file, ready file, service log file, and any additional paths listed in `ownedArtifacts`, unless the user explicitly asked to keep them. If the scratch directory becomes empty after cleanup, remove it too.
+15. If you started the bundled collector for this task, stop it and delete the session artifacts it owns after any final evidence handoff. Use the collector metadata as authoritative: remove the active session's NDJSON log file, location-state file, ready file, service log file, and any additional paths listed in `ownedArtifacts`, unless the user explicitly asked to keep them. If the scratch directory becomes empty after cleanup, remove it too.
 16. If the fix fails, remove code changes that came from rejected hypotheses, keep useful instrumentation, generate new hypotheses from a different subsystem, and repeat.
 
 ## Guardrails
@@ -67,9 +68,11 @@ Before starting, normalize the current debugging environment without preflightin
 ## Instrumentation Rules
 
 - Map each log to at least one `hypothesisId`.
+- Set `location` on every temporary log to the actual source file and line for that injected log. The bundled collector uses that field to maintain the live location-state JSON file.
+- When the current session exposes `syncLocationsUrl` or a writable location-state file, sync the collector's active location list using the full set of currently injected log points. Repeat that sync after removing temporary logs so the sidecar state tracks source injections rather than whichever NDJSON file happened to run last. Keep the exact sync payload and validation contract in [runtime-debugging.md](./references/runtime-debugging.md). If that support is unavailable, keep `location` populated in the log payloads and continue without collector-managed active-location state for that session.
 - Include enough context to prove control flow and state transitions: parameters, branch choice, before/after values, errors, or return values.
 - Wrap each inserted debug log in a collapsible code region when the language supports regions.
-- If the session provides a logging endpoint, log path, session ID, or ready file, treat those values as authoritative and use them exactly.
+- If the session provides a logging endpoint, log path, session ID, ready file, or location-state file, treat those values as authoritative and use them exactly.
 - When the session provides no logging configuration, prefer the bundled local collector service over ad hoc console logging or temporary files. If no Python 3 interpreter is available for that collector, stop and tell the user the configured debug mode cannot continue until they provide an authoritative logging session or a local Python 3 runtime.
 - For JavaScript or TypeScript running in browser/client code, send logs directly to the active HTTP ingestion endpoint. Default to the local collector endpoint when you started the bundled service.
 - For JavaScript or TypeScript running only on the server, use the same active HTTP endpoint from that runtime instead of inventing a second ingest layer.
@@ -88,7 +91,7 @@ Before starting, normalize the current debugging environment without preflightin
 - Read the active session log file itself when analyzing evidence.
 - When you started the bundled collector, treat its `ownedArtifacts` metadata as the authoritative teardown list for post-success cleanup.
 
-Read [runtime-debugging.md](./references/runtime-debugging.md) for local collector bootstrap commands, dashboard URLs, CORS behavior, payload fields, logging templates, response shape, and verification rules.
+Read [runtime-debugging.md](./references/runtime-debugging.md) for local collector bootstrap commands, location-state JSON schema, dashboard `Locations` tab behavior, `~/.junerdd/config.json` IDE settings, CORS behavior, payload fields, logging templates, response shape, and verification rules.
 
 ## Response Shape
 

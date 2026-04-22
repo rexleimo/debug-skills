@@ -83,6 +83,15 @@ body::before {
   border-left-color: #00d4aa;
 }
 
+.location-row {
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.location-row:hover {
+  background: rgba(0,212,170,0.05);
+  border-color: rgba(0,212,170,0.35);
+  transform: translateY(-1px);
+}
+
 /* ── Tab buttons (detail payload/meta + mobile nav) ── */
 .tab-btn {
   transition: color 100ms, border-color 100ms;

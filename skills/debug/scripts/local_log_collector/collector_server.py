@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import secrets
 import threading
 import time
 from http import HTTPStatus
@@ -14,18 +15,48 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from collector_config import (
+    CONFIG_FILE,
+    ConfigError,
+    build_config_response,
+    get_stored_selected_ide,
+    load_root_config,
+    update_collector_selected_ide,
+)
+from collector_ide import (
+    enrich_location_records,
+    get_ide_option,
+    get_ide_spec,
+    list_ide_options,
+    open_location_in_ide,
+    resolve_location,
+    resolve_selected_ide,
+)
 from collector_state import (
     DEFAULT_LOG_WINDOW_LIMIT,
     MAX_LOG_WINDOW_LIMIT,
     append_entry_to_cache,
+    build_location_state_payload,
     build_log_detail_response,
     build_logs_response,
     build_service_payload,
     build_state_response,
+    clear_log_file,
+    sync_log_cache,
+    sync_tracked_locations,
+    write_location_state_file,
 )
 
-CORS_ALLOW_HEADERS = 'Content-Type, X-Debug-Session-Id'
-CORS_ALLOW_METHODS = 'GET, POST, OPTIONS'
+INGEST_CORS_ALLOW_HEADERS = 'Content-Type, X-Debug-Session-Id'
+INGEST_CORS_ALLOW_METHODS = 'POST, OPTIONS'
+DASHBOARD_TOKEN_HEADER = 'X-Debug-Dashboard-Token'
+SENSITIVE_POST_PATHS = {
+    '/api/clear',
+    '/api/config',
+    '/api/locations/sync',
+    '/api/open-location',
+    '/api/shutdown',
+}
 STATIC_DIR = Path(__file__).resolve().parent / 'static'
 
 
@@ -39,12 +70,20 @@ class CollectorServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         log_file: Path,
+        workspace_root: Path,
+        default_ide: str,
+        location_state_file: Path | None,
         ready_file: Path | None,
         session_id: str | None,
         service_log_file: Path | None = None,
     ) -> None:
         super().__init__(server_address, CollectorRequestHandler)
         self.log_file = log_file
+        self.workspace_root = workspace_root
+        self.default_ide = default_ide
+        self.config_file = CONFIG_FILE
+        self.dashboard_token = secrets.token_urlsafe(24)
+        self.location_state_file = location_state_file
         self.ready_file = ready_file
         self.session_id = session_id
         self.service_log_file = service_log_file
@@ -54,10 +93,14 @@ class CollectorServer(ThreadingHTTPServer):
         self.entries: list[dict[str, Any]] = []
         self.run_counts = Counter()
         self.hypothesis_counts = Counter()
+        self.location_counts = Counter()
+        self.location_records: dict[str, dict[str, Any]] = {}
+        self.tracked_location_records: dict[str, dict[str, Any]] = {}
         self.invalid_lines = 0
         self.last_event: dict[str, Any] | None = None
         self.file_size_bytes = 0
         self.file_updated_at: int | None = None
+        self.location_state_updated_at: int | None = None
         self.physical_line_count = 0
         self.dashboard_open_attempted = False
         self.dashboard_open_succeeded: bool | None = None
@@ -88,6 +131,22 @@ class CollectorServer(ThreadingHTTPServer):
         return f'{self.base_url}/api/logs/detail'
 
     @property
+    def locations_url(self) -> str:
+        return f'{self.base_url}/api/locations'
+
+    @property
+    def config_url(self) -> str:
+        return f'{self.base_url}/api/config'
+
+    @property
+    def sync_locations_url(self) -> str:
+        return f'{self.base_url}/api/locations/sync'
+
+    @property
+    def open_location_url(self) -> str:
+        return f'{self.base_url}/api/open-location'
+
+    @property
     def clear_url(self) -> str:
         return f'{self.base_url}/api/clear'
 
@@ -101,7 +160,12 @@ class CollectorServer(ThreadingHTTPServer):
 
     @property
     def owned_artifacts(self) -> list[str]:
-        ordered_paths = [self.log_file, self.ready_file, self.service_log_file]
+        ordered_paths = [
+            self.log_file,
+            self.location_state_file,
+            self.ready_file,
+            self.service_log_file,
+        ]
         unique_paths: list[str] = []
         seen: set[str] = set()
         for path in ordered_paths:
@@ -132,8 +196,10 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
     server_version = 'DebugLogCollector/1.0'
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
         self.send_response(HTTPStatus.NO_CONTENT)
-        self._send_cors_headers()
+        if path == '/ingest':
+            self._send_ingest_cors_headers()
         self.send_header('Content-Length', '0')
         self.end_headers()
 
@@ -174,9 +240,14 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.OK if payload.get('ok') else HTTPStatus.NOT_FOUND
             self._json_response(status, payload)
             return
+        if path == '/api/locations':
+            self._json_response(HTTPStatus.OK, self._build_locations_response())
+            return
+        if path == '/api/config':
+            self._json_response(HTTPStatus.OK, self._build_config_payload())
+            return
         if path == '/favicon.ico':
             self.send_response(HTTPStatus.NO_CONTENT)
-            self._send_cors_headers()
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
@@ -187,10 +258,21 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if path == '/ingest':
             self._handle_ingest()
             return
+        if path in SENSITIVE_POST_PATHS and not self._require_dashboard_access():
+            return
         if path == '/api/clear':
             with self.server.write_lock:
-                self.server.log_file.write_text('', encoding='utf-8')
+                clear_log_file(self.server)
             self._json_response(HTTPStatus.OK, self.server.build_state())
+            return
+        if path == '/api/config':
+            self._handle_config_update()
+            return
+        if path == '/api/locations/sync':
+            self._handle_locations_sync()
+            return
+        if path == '/api/open-location':
+            self._handle_open_location()
             return
         if path == '/api/shutdown':
             self.server.shutdown_requested_at = int(time.time() * 1000)
@@ -207,17 +289,21 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         self._json_response(HTTPStatus.NOT_FOUND, {'ok': False, 'error': 'not_found'})
 
     def _handle_ingest(self) -> None:
-        content_length = int(self.headers.get('Content-Length', '0'))
-        raw_body = self.rfile.read(content_length) if content_length else b''
-
-        try:
-            payload: Any = json.loads(raw_body.decode('utf-8') or '{}')
-        except json.JSONDecodeError:
-            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid_json'})
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {'ok': False, 'error': 'invalid_json'},
+                cors_mode='ingest',
+            )
             return
 
         if not isinstance(payload, dict):
-            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'payload_must_be_object'})
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {'ok': False, 'error': 'payload_must_be_object'},
+                cors_mode='ingest',
+            )
             return
 
         header_session_id = self.headers.get('X-Debug-Session-Id')
@@ -240,8 +326,201 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
             self.server.file_size_bytes = file_size_bytes
             self.server.file_updated_at = int(time.time() * 1000)
             append_entry_to_cache(self.server, payload, offset=offset, size=len(encoded_line))
+            write_location_state_file(self.server)
 
-        self._json_response(HTTPStatus.ACCEPTED, {'ok': True})
+        self._json_response(HTTPStatus.ACCEPTED, {'ok': True}, cors_mode='ingest')
+
+    def _handle_config_update(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid_json'})
+            return
+        if not isinstance(payload, dict):
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'payload_must_be_object'})
+            return
+
+        selected_ide = self._extract_selected_ide(payload)
+        if selected_ide is None:
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'selected_ide_required'})
+            return
+        if not isinstance(selected_ide, str):
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {'ok': False, 'error': 'selected_ide_must_be_string'},
+            )
+            return
+
+        normalized_ide = selected_ide.strip().lower()
+        if normalized_ide and get_ide_spec(normalized_ide) is None:
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {'ok': False, 'error': 'unsupported_ide', 'ide': normalized_ide},
+            )
+            return
+
+        with self.server.write_lock:
+            try:
+                updated_config = update_collector_selected_ide(normalized_ide)
+            except ConfigError as exc:
+                self._json_response(
+                    HTTPStatus.CONFLICT,
+                    {'ok': False, 'error': str(exc), 'configFile': str(self.server.config_file)},
+                )
+                return
+
+        self._json_response(HTTPStatus.OK, self._build_config_payload(root_config=updated_config))
+
+    def _handle_open_location(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid_json'})
+            return
+        if not isinstance(payload, dict):
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'payload_must_be_object'})
+            return
+
+        location = payload.get('location')
+        if not isinstance(location, str) or not location.strip():
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'location_required'})
+            return
+
+        _, selected_ide, _, _, _ = self._resolve_config_state()
+        requested_ide = payload.get('ide')
+        requested_ide_id = (
+            requested_ide.strip().lower()
+            if isinstance(requested_ide, str) and requested_ide.strip()
+            else ''
+        )
+        if requested_ide_id and requested_ide_id != selected_ide:
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    'ok': False,
+                    'error': 'ide_mismatch',
+                    'ide': selected_ide,
+                    'requestedIde': requested_ide_id,
+                },
+            )
+            return
+
+        ide_id = selected_ide
+        resolved_location = resolve_location(location, self.server.workspace_root)
+
+        try:
+            open_result = open_location_in_ide(ide_id, resolved_location)
+        except ValueError as exc:
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    'ok': False,
+                    'error': str(exc),
+                    'ide': ide_id,
+                    'location': resolved_location,
+                },
+            )
+            return
+        except RuntimeError as exc:
+            self._json_response(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    'ok': False,
+                    'error': str(exc),
+                    'ide': ide_id,
+                    'location': resolved_location,
+                },
+            )
+            return
+
+        self._json_response(
+            HTTPStatus.OK,
+            {
+                'ok': True,
+                'ide': open_result['ide'],
+                'label': open_result['label'],
+                'launchStatus': open_result['launchStatus'],
+                'confirmed': open_result['confirmed'],
+                'location': resolved_location,
+            },
+        )
+
+    def _handle_locations_sync(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'invalid_json'})
+            return
+        if not isinstance(payload, dict):
+            self._json_response(HTTPStatus.BAD_REQUEST, {'ok': False, 'error': 'payload_must_be_object'})
+            return
+
+        raw_locations = payload.get('locations')
+        try:
+            with self.server.write_lock:
+                sync_tracked_locations(self.server, raw_locations)
+        except ValueError as exc:
+            self._json_response(
+                HTTPStatus.BAD_REQUEST,
+                {'ok': False, 'error': str(exc)},
+            )
+            return
+
+        self._json_response(HTTPStatus.OK, self._build_locations_response())
+
+    def _resolve_config_state(
+        self,
+        *,
+        root_config: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str, str, list[dict[str, Any]], str]:
+        config_error = ''
+        if root_config is None:
+            try:
+                config = load_root_config()
+            except ConfigError as exc:
+                config = {}
+                config_error = str(exc)
+        else:
+            config = root_config
+        stored_selected_ide = get_stored_selected_ide(config)
+        ide_options = list_ide_options(stored_selected_ide)
+        selected_ide, selected_source = resolve_selected_ide(
+            stored_selected_ide=stored_selected_ide,
+            default_ide=self.server.default_ide,
+            ide_options=ide_options,
+        )
+        return config, selected_ide, selected_source, ide_options, config_error
+
+    def _build_config_payload(
+        self,
+        *,
+        root_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config, selected_ide, selected_source, ide_options, config_error = self._resolve_config_state(
+            root_config=root_config,
+        )
+        selected_option = get_ide_option(selected_ide, ide_options)
+        return build_config_response(
+            config,
+            selected_ide=selected_ide,
+            selected_ide_available=bool(selected_option and selected_option['available']),
+            selected_source=selected_source,
+            ide_options=ide_options,
+            config_error=config_error,
+        )
+
+    def _build_locations_response(self) -> dict[str, Any]:
+        with self.server.write_lock:
+            sync_log_cache(self.server)
+            payload = build_location_state_payload(self.server)
+
+        payload['ok'] = True
+        payload['workspaceRoot'] = str(self.server.workspace_root)
+        payload['locations'] = enrich_location_records(
+            payload.get('locations', []),
+            workspace_root=self.server.workspace_root,
+        )
+        config_payload = self._build_config_payload()
+        payload['ide'] = config_payload['ide']
+        payload['configError'] = config_payload.get('configError', '')
+        return payload
 
     def _resolve_static_asset(self, path: str) -> tuple[Path, str] | None:
         if path in {'/', '/dashboard'}:
@@ -267,28 +546,68 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
 
         body = asset_path.read_bytes()
         self.send_response(HTTPStatus.OK)
-        self._send_cors_headers()
         self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _json_response(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+    def _json_response(
+        self,
+        status: HTTPStatus,
+        payload: dict[str, Any],
+        *,
+        cors_mode: str = 'none',
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode('utf-8')
         self.send_response(status)
-        self._send_cors_headers()
+        if cors_mode == 'ingest':
+            self._send_ingest_cors_headers()
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_cors_headers(self) -> None:
+    def _send_ingest_cors_headers(self) -> None:
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', CORS_ALLOW_HEADERS)
-        self.send_header('Access-Control-Allow-Methods', CORS_ALLOW_METHODS)
+        self.send_header('Access-Control-Allow-Headers', INGEST_CORS_ALLOW_HEADERS)
+        self.send_header('Access-Control-Allow-Methods', INGEST_CORS_ALLOW_METHODS)
         self.send_header('Access-Control-Max-Age', '600')
+
+    def _require_dashboard_access(self) -> bool:
+        origin = self.headers.get('Origin', '').strip()
+        if origin and origin != self.server.base_url:
+            self._json_response(
+                HTTPStatus.FORBIDDEN,
+                {'ok': False, 'error': 'dashboard_origin_forbidden'},
+            )
+            return False
+
+        provided_token = self.headers.get(DASHBOARD_TOKEN_HEADER, '').strip()
+        if provided_token != self.server.dashboard_token:
+            self._json_response(
+                HTTPStatus.FORBIDDEN,
+                {'ok': False, 'error': 'dashboard_token_required'},
+            )
+            return False
+
+        return True
+
+    def _extract_selected_ide(self, payload: dict[str, Any]) -> Any | None:
+        direct_selected = payload.get('selectedIde')
+        if direct_selected is not None:
+            return direct_selected
+
+        current: Any = payload
+        for key in ('debug', 'collector', 'ide'):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+
+        if not isinstance(current, dict) or 'selected' not in current:
+            return None
+        return current.get('selected')
 
     def _parse_int(
         self,
@@ -307,6 +626,14 @@ class CollectorRequestHandler(BaseHTTPRequestHandler):
         if maximum is not None:
             parsed = min(parsed, maximum)
         return parsed
+
+    def _read_json_body(self) -> Any | None:
+        content_length = int(self.headers.get('Content-Length', '0'))
+        raw_body = self.rfile.read(content_length) if content_length else b''
+        try:
+            return json.loads(raw_body.decode('utf-8') or '{}')
+        except json.JSONDecodeError:
+            return None
 
     def log_message(self, format: str, *args: Any) -> None:
         return

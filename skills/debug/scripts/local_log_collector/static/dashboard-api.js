@@ -2,15 +2,22 @@ export const API_ROUTES = {
   state: '/api/state',
   logs: '/api/logs',
   logDetail: '/api/logs/detail',
+  locations: '/api/locations',
+  config: '/api/config',
+  openLocation: '/api/open-location',
   clear: '/api/clear',
   shutdown: '/api/shutdown',
 }
 
 export async function fetchJson(url, options) {
+  const { headers, ...rest } = options || {}
   const response = await fetch(url, {
     cache: 'no-store',
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(headers || {}),
+    },
+    ...rest,
   })
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
