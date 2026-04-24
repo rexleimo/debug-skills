@@ -100,10 +100,12 @@ This command:
 
 The outcome file is designed to help later AI passes write plans and design docs. It includes:
 
-- normalized planning seeds grouped as goals, constraints, risks, decisions, scope boundaries, or additional confirmed inputs
+- normalized planning seeds grouped as goals, constraints, risks, decisions, scope boundaries, or uncategorized planning seeds
 - a low-noise Q&A summary that keeps the resolved answer for each question
 - minimal recommendation context only when the raw user reply is assent-only and would otherwise lose the confirmed decision
 - a raw user-answer echo only when that extra context is needed to show what was actually confirmed
+
+`Uncategorized Planning Seeds` is a fallback planning bucket for confirmed answers that do not match a more specific planning category. It is not a second Q&A log; every confirmed answer still appears once in `Confirmed Q&A`.
 
 The raw session transcript remains the full audit record for the assistant's original question-time recommendation and the exact turn-by-turn exchange. The planning-ready outcome should stay compact: keep only the context needed for a later planning pass to understand the confirmed decision without reopening the full transcript in common cases.
 
