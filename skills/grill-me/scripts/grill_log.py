@@ -172,6 +172,9 @@ def uses_recommendation_context(entry: dict[str, str]) -> bool:
     return normalize_inline(resolved_answer_text(entry)) != normalize_inline(entry["answer_text"])
 
 
+UNCATEGORIZED_PLANNING_BUCKET = "Uncategorized Planning Seeds"
+
+
 def primary_bucket(question_text: str) -> str:
     question = question_text.lower()
     if any(token in question for token in ("goal", "objective", "success", "outcome", "purpose", "problem")):
@@ -197,7 +200,7 @@ def primary_bucket(question_text: str) -> str:
         return "Operations and Delivery"
     if any(token in question for token in ("constraint", "limit", "budget", "deadline", "cannot", "requirement", "latency", "throughput", "compatibility", "compliance")):
         return "Constraints"
-    return "Additional Confirmed Inputs"
+    return UNCATEGORIZED_PLANNING_BUCKET
 
 
 def parse_session_entries(content: str) -> list[dict[str, str]]:
@@ -513,7 +516,7 @@ def outcome_path_for_session(log_path: Path) -> Path:
 def render_bucket_section(lines: list[str], title: str, entries: list[dict[str, str]]) -> None:
     if not entries:
         return
-    lines.extend([f"## {title}", ""])
+    lines.extend([f"### {title}", ""])
     for entry in entries:
         lines.append(f"- Q{entry['index']}: {summarize_text(resolved_answer_text(entry))}")
         lines.append(f"  Source question: {normalize_inline(entry['question_text'])}")
@@ -534,7 +537,7 @@ def build_outcome_markdown(
         "Risks",
         "Decisions and Alternatives",
         "Operations and Delivery",
-        "Additional Confirmed Inputs",
+        UNCATEGORIZED_PLANNING_BUCKET,
     ]
 
     lines = [
