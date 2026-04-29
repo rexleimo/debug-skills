@@ -19,7 +19,7 @@ Before starting, normalize the current debugging environment without preflightin
 - Determine whether each planned log point runs in browser/client code, server/runtime code, or both. For browser/client code, prefer direct requests to the active collector endpoint instead of adding project-local proxy routes.
 - Determine how the user signals that reproduction is complete: explicit UI button, task-state action, or a short chat reply.
 - Do not treat target-app startup, health checks, route probes, or compile/build checks as default preflight. Only inspect them when the user explicitly asked to debug startup behavior or when a current hypothesis is about app boot, compilation, or endpoint availability.
-- Store temporary artifacts in an existing host-specific scratch directory when one already exists. Otherwise default to a workspace-local hidden directory such as `.debug-logs/`. If you start the bundled collector yourself, treat that session's artifact list as temporary state you own and must delete after a successful debug pass unless the user explicitly asks to keep it.
+- Store temporary artifacts in an existing host-specific scratch directory when one already exists. Otherwise default to a workspace-local hidden directory such as `.debug-logs/`. If you start the bundled collector yourself, use its `ownedArtifacts` list as the cleanup source of truth because `.debug-logs/` is often ignored by Git.
 
 ## Workflow
 
@@ -37,7 +37,7 @@ Before starting, normalize the current debugging environment without preflightin
 12. Clear only the active session's current logs again so before/after evidence does not mix.
 13. Ask for a post-fix reproduction run and compare before/after logs. Use the same handoff rules in [runtime-debugging.md](./references/runtime-debugging.md), then wait for the user's completion signal before continuing.
 14. Remove all injected temporary logging code only after logs prove the fix worked and the user confirms the issue is gone. This includes the inserted log calls, debug-only endpoint constants, temporary headers, and any other scaffolding added only for this debugging pass.
-15. If you started the bundled collector for this task, stop it and delete the session artifacts it owns after any final evidence handoff. Use the collector metadata as authoritative: remove the active session's NDJSON log file, location-state file, ready file, service log file, and any additional paths listed in `ownedArtifacts`, unless the user explicitly asked to keep them. If the scratch directory becomes empty after cleanup, remove it too.
+15. If you started the bundled collector for this task, stop it after the final evidence handoff, delete every path in `ownedArtifacts` unless the user asked to keep evidence, verify those exact paths no longer exist, and remove the scratch directory if it becomes empty. Do not use Git status, diffs, or untracked-file scans to infer cleanup because ignored artifacts may be hidden.
 16. If the fix fails, remove code changes that came from rejected hypotheses, keep useful instrumentation, generate new hypotheses from a different subsystem, and repeat.
 
 ## Guardrails
@@ -63,6 +63,7 @@ Before starting, normalize the current debugging environment without preflightin
 - Never restart the collector and leave the temporary logging code pointed at a stale ingest port.
 - Never leave injected temporary logging code behind after the bug is proven fixed and the user confirms the issue is gone.
 - Never leave bundled-collector session artifacts behind after a successful debug session unless the user explicitly asked to keep them.
+- Never treat a clean Git status as proof that collector artifacts were removed; ignored `.debug-logs/` files must be checked by path.
 - Never delete files that belong to an externally provided logging session you did not create.
 
 ## Instrumentation Rules
@@ -89,7 +90,6 @@ Before starting, normalize the current debugging environment without preflightin
 - When you need a clean rerun, clear the current session's existing logs before collecting the next pass so stale entries do not pollute the evidence.
 - Prefer calling the active clear endpoint for that reset when one exists. Only truncate the active session log file directly when no clear endpoint is available.
 - Read the active session log file itself when analyzing evidence.
-- When you started the bundled collector, treat its `ownedArtifacts` metadata as the authoritative teardown list for post-success cleanup.
 
 Read [runtime-debugging.md](./references/runtime-debugging.md) for local collector bootstrap commands, location-state JSON schema, dashboard `Locations` tab behavior, `~/.junerdd/config.json` IDE settings, CORS behavior, payload fields, logging templates, response shape, and verification rules.
 
