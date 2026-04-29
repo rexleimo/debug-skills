@@ -27,7 +27,7 @@ Use this reference when the debugging task needs exact logging, local collector 
 
 Adapt the debugging infrastructure to the current host before running commands. Do not preflight the target app unless startup failure is part of the bug you are investigating:
 
-1. Confirm where temporary debug artifacts should live. Reuse an existing host-specific scratch directory when one exists; otherwise default to `$PWD/.debug-logs/`.
+1. Confirm where temporary debug artifacts should live. Reuse an existing host-specific scratch directory when one exists; otherwise default to `$PWD/.debug-logs/`. Scratch directories such as `.debug-logs/` may be ignored by Git, so do not use `git status`, `git diff`, or untracked-file scans as the cleanup source of truth for collector artifacts.
 2. Confirm how the host keeps long-lived processes alive: persistent PTY, detached job, task runner, or another supported mechanism.
 3. If no authoritative logging configuration already exists, resolve a local Python 3 interpreter for the bundled collector. Prefer `python3`; otherwise allow `python` only when it resolves to Python 3. If neither is available, stop and tell the user you need either an existing logging session or Python 3 for this evidence-first mode.
 4. Confirm whether the host can open or automate browser pages. If not, rely on the ready file and HTTP APIs. When it can, reserve page opening for the collector dashboard unless the user explicitly asked to open the target project.
@@ -387,25 +387,61 @@ Only delete artifacts you own.
 
 - If the logging session was provided by the host, another tool, or the user, do not delete its files.
 - If you started the bundled collector for the current task, stop it after post-fix verification succeeds and after any final evidence handoff the user still needs.
+- Capture the ready-file payload, including `dashboardToken`, `shutdownUrl`, and `ownedArtifacts`, before deleting anything.
+- Stop the collector with the session-scoped `X-Debug-Dashboard-Token` header and confirm it is no longer reachable before deleting artifacts. If shutdown fails, do not report cleanup as complete.
 - Then delete every path listed in `ownedArtifacts`, which should include the session NDJSON log, location-state file, ready file, and service log.
+- Do not rely on Git visibility for cleanup verification. `.debug-logs/` is commonly in `.gitignore`, so ignored leftovers will not appear in normal status output.
+- After deletion, check every `ownedArtifacts` path directly and fail the cleanup if any owned path still exists.
 - If the scratch directory becomes empty after that deletion, remove it too.
 
 One safe pattern is:
 
 ```bash
-curl -X POST "<SHUTDOWN_URL>" \
-  -H 'Content-Type: application/json' \
-  --data '{}'
 python3 - <<'PY' "<READY_FILE>"
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import sys
+import time
+import urllib.error
+import urllib.request
 
 ready_path = Path(sys.argv[1])
 payload = json.loads(ready_path.read_text(encoding='utf-8'))
 artifacts = [Path(path) for path in payload.get('ownedArtifacts', []) if path]
+shutdown_url = payload.get('shutdownUrl')
+health_url = payload.get('healthUrl')
+dashboard_token = payload.get('dashboardToken')
+
+if shutdown_url:
+    headers = {'Content-Type': 'application/json'}
+    if dashboard_token:
+        headers['X-Debug-Dashboard-Token'] = dashboard_token
+    request = urllib.request.Request(
+        shutdown_url,
+        data=b'{}',
+        headers=headers,
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status >= 400:
+                raise SystemExit(f'[ERROR] Collector shutdown failed: HTTP {response.status}')
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f'[ERROR] Collector shutdown failed: HTTP {exc.code}') from exc
+    except urllib.error.URLError:
+        pass
+
+if health_url:
+    for _ in range(30):
+        try:
+            urllib.request.urlopen(health_url, timeout=0.25).close()
+        except Exception:
+            break
+        time.sleep(0.1)
+    else:
+        raise SystemExit('[ERROR] Collector is still reachable after shutdown; not deleting artifacts.')
 
 for artifact in artifacts:
     try:
@@ -413,11 +449,17 @@ for artifact in artifacts:
     except FileNotFoundError:
         pass
 
-artifact_dir = Path(payload['logFile']).parent
-try:
-    artifact_dir.rmdir()
-except OSError:
-    pass
+remaining = [str(artifact) for artifact in artifacts if artifact.exists()]
+if remaining:
+    raise SystemExit('[ERROR] Collector cleanup left owned artifacts:\n' + '\n'.join(remaining))
+
+artifact_anchor = payload.get('logFile') or (str(artifacts[0]) if artifacts else '')
+if artifact_anchor:
+    artifact_dir = Path(artifact_anchor).parent
+    try:
+        artifact_dir.rmdir()
+    except OSError:
+        pass
 PY
 ```
 
@@ -542,5 +584,5 @@ Quote or cite the specific log entries that support the judgment.
 - Tag verification runs with a distinct `runId` such as `post-fix`.
 - Compare before and after logs before claiming success.
 - Remove all injected temporary logging code only after log proof and user confirmation. Remove the inserted log calls and any temporary endpoint constants, headers, or other debug-only scaffolding that was added for the current debugging pass.
-- When you started the bundled collector, stop it and delete every path in `ownedArtifacts` after success unless the user explicitly asked to keep the evidence files.
+- When you started the bundled collector, stop it with the dashboard token, delete every path in `ownedArtifacts`, and verify those exact paths no longer exist after success unless the user explicitly asked to keep the evidence files.
 - If a hypothesis is rejected, remove the code changes based on that hypothesis instead of letting speculative changes accumulate.

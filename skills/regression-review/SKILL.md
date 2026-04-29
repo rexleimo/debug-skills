@@ -38,8 +38,10 @@ Keep the overall recommendation mechanically aligned with the highest-severity u
 ## Output Rules
 
 - Always write a Markdown file.
-- If the repo already has an obvious location for reviews or reports, follow that convention.
-- Otherwise write to `tmp/reviews/YYYY-MM-DD-user-visible-regression-report.md`.
+- Generate a fresh random id for each report filename, such as 8 lowercase hex characters from `openssl rand -hex 4`, `uuidgen`, or an equivalent local source.
+- If the repo already has an obvious location for reviews or reports, follow that directory convention, but still append the random id immediately before `.md` unless the repo's convention already guarantees a unique per-run filename.
+- Otherwise write to `tmp/reviews/YYYY-MM-DD-user-visible-regression-report-<random-id>.md`.
+- Do not overwrite an existing report. If the chosen path already exists, generate a new id and choose a new path before writing.
 - End with a short terminal summary that includes the report path, the gate recommendation, completion status, counts by action, and the top risks.
 - Structure the report in this order:
   - `Scope`
