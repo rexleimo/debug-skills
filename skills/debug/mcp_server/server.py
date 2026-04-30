@@ -137,6 +137,11 @@ def start_debug_session(
     location_state_file = log_dir / f"{session_id}.locations.json"
     service_log_file = log_dir / f"{session_id}.service.log"
 
+    try:
+        ready_file.unlink(missing_ok=True)
+    except OSError as e:
+        return {"error": f"Failed to clear stale ready file: {e}"}
+
     cmd = [
         python_bin,
         str(COLLECTOR_MAIN),
@@ -146,8 +151,9 @@ def start_debug_session(
         "--service-log-file", str(service_log_file),
         "--session-id", session_id,
         "--workspace-root", str(ws),
-        "--no-open-dashboard" if not open_dashboard else "--open-dashboard",
     ]
+    if not open_dashboard:
+        cmd.append("--no-open-dashboard")
     if ide:
         cmd.extend(["--default-ide", ide])
 
