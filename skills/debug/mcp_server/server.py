@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""MCP server for evidence-first runtime debugging.
+
+Exposes the debug skill's collector as MCP tools, resources, and prompts
+so any MCP-compatible agent can use the debug workflow.
+
+Run:
+    uv run skills/debug/mcp_server/server.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+SKILL_ROOT = Path(__file__).resolve().parent.parent
+COLLECTOR_MAIN = SKILL_ROOT / "scripts" / "local_log_collector" / "main.py"
+SKILL_MD = SKILL_ROOT / "SKILL.md"
+RUNTIME_DEBUGGING_MD = SKILL_ROOT / "references" / "runtime-debugging.md"
+
+mcp = FastMCP(
+    "debug",
+    instructions=(
+        "Evidence-first runtime debugging MCP server. "
+        "Use start_debug_session to begin, instrument your code with fetch() "
+        "calls to the returned endpoint, then use get_debug_logs to analyze evidence."
+    ),
+)
+
+# --- Session state ---
+
+_active_session: dict[str, Any] | None = None
+_collector_process: subprocess.Popen | None = None
+
+
+# --- HTTP helpers (stdlib only) ---
+
+
+def _http_get(url: str, timeout: float = 5.0) -> dict[str, Any]:
+    """GET a JSON endpoint."""
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _http_post(
+    url: str,
+    data: dict[str, Any] | None = None,
+    token: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """POST JSON to an endpoint, optionally with dashboard token auth."""
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Debug-Dashboard-Token"] = token
+    body = json.dumps(data or {}).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _require_session() -> dict[str, Any]:
+    """Return active session or raise a tool error."""
+    if _active_session is None:
+        return {"error": "No active debug session. Call start_debug_session first."}
+    return _active_session
+
+
+def _resolve_python3() -> str:
+    """Find a Python 3 interpreter."""
+    for candidate in ("python3", "python"):
+        path = shutil.which(candidate)
+        if path:
+            try:
+                out = subprocess.check_output(
+                    [path, "--version"], stderr=subprocess.STDOUT, timeout=5
+                )
+                if b"Python 3" in out:
+                    return path
+            except (subprocess.SubprocessError, OSError):
+                continue
+    raise RuntimeError("No Python 3 interpreter found")
+
+
+# --- Tools ---
+
+
+@mcp.tool()
+def start_debug_session(
+    session_id: str = "mcp-debug",
+    workspace_root: str = "",
+    ide: str = "",
+    open_dashboard: bool = True,
+) -> dict[str, Any]:
+    """Start a debug collector session.
+
+    Spawns the NDJSON log collector as a subprocess and returns session info
+    including the ingest endpoint, dashboard URL, and dashboard token.
+
+    Args:
+        session_id: Unique identifier for this debug session.
+        workspace_root: Workspace root for resolving relative paths. Defaults to cwd.
+        ide: Default IDE id (cursor, vscode, windsurf, zed, webstorm, etc.).
+        open_dashboard: Whether to auto-open the dashboard in a browser.
+    """
+    global _active_session, _collector_process
+
+    if _active_session is not None:
+        return {
+            "error": "A debug session is already active. Call stop_debug_session first.",
+            "session": _active_session,
+        }
+
+    try:
+        python_bin = _resolve_python3()
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+    ws = Path(workspace_root).expanduser().resolve() if workspace_root else Path.cwd().resolve()
+    log_dir = ws / ".debug-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = log_dir / f"{session_id}.ndjson"
+    ready_file = log_dir / f"{session_id}.json"
+    location_state_file = log_dir / f"{session_id}.locations.json"
+    service_log_file = log_dir / f"{session_id}.service.log"
+
+    cmd = [
+        python_bin,
+        str(COLLECTOR_MAIN),
+        "--log-file", str(log_file),
+        "--ready-file", str(ready_file),
+        "--location-state-file", str(location_state_file),
+        "--service-log-file", str(service_log_file),
+        "--session-id", session_id,
+        "--workspace-root", str(ws),
+        "--no-open-dashboard" if not open_dashboard else "--open-dashboard",
+    ]
+    if ide:
+        cmd.extend(["--default-ide", ide])
+
+    try:
+        _collector_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(SKILL_ROOT / "scripts" / "local_log_collector"),
+        )
+    except OSError as e:
+        return {"error": f"Failed to start collector: {e}"}
+
+    # Wait for ready file (up to 10s)
+    for _ in range(100):
+        if ready_file.exists():
+            try:
+                raw = json.loads(ready_file.read_text())
+                session_info = {
+                    "status": "started",
+                    "session_id": session_id,
+                    "endpoint": raw.get("endpoint"),
+                    "dashboard_url": raw.get("dashboardUrl"),
+                    "ingest_url": raw.get("endpoint"),
+                    "health_url": raw.get("healthUrl"),
+                    "state_url": raw.get("stateUrl"),
+                    "logs_url": raw.get("logsUrl"),
+                    "clear_url": raw.get("clearUrl"),
+                    "locations_sync_url": raw.get("syncLocationsUrl"),
+                    "open_location_url": raw.get("openLocationUrl"),
+                    "shutdown_url": raw.get("shutdownUrl"),
+                    "dashboard_token": raw.get("dashboardToken"),
+                    "log_file": str(log_file),
+                    "pid": _collector_process.pid,
+                    "owned_artifacts": raw.get("ownedArtifacts", []),
+                }
+                _active_session = session_info
+                return dict(session_info)
+            except json.JSONDecodeError:
+                pass
+        if _collector_process.poll() is not None:
+            stderr = (_collector_process.stderr or b"").read().decode()
+            return {"error": f"Collector exited immediately: {stderr}"}
+        time.sleep(0.1)
+
+    _collector_process.kill()
+    _collector_process = None
+    return {"error": "Collector did not write ready file within 10s"}
+
+
+@mcp.tool()
+def stop_debug_session() -> dict[str, Any]:
+    """Stop the active debug collector and clean up artifacts.
+
+    Shuts down the collector process, deletes all session artifacts
+    (log files, ready files, location state), and removes the scratch
+    directory if empty.
+    """
+    global _active_session, _collector_process
+
+    if _active_session is None:
+        return {"error": "No active debug session."}
+
+    session = _active_session
+    shutdown_url = session.get("shutdown_url")
+    health_url = session.get("health_url")
+    token = session.get("dashboard_token")
+    artifacts = session.get("owned_artifacts", [])
+
+    # Send shutdown
+    if shutdown_url and token:
+        try:
+            _http_post(shutdown_url, token=token, timeout=3)
+        except (urllib.error.URLError, OSError):
+            pass
+
+    # Wait for process to exit
+    if _collector_process is not None:
+        try:
+            _collector_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _collector_process.kill()
+            _collector_process.wait(timeout=2)
+        _collector_process = None
+
+    # Delete artifacts
+    deleted: list[str] = []
+    for artifact_path in artifacts:
+        p = Path(artifact_path)
+        if p.exists():
+            p.unlink()
+            deleted.append(str(p))
+
+    # Remove .debug-logs if empty
+    log_dir = Path(session.get("log_file", "")).parent
+    if log_dir.exists() and not any(log_dir.iterdir()):
+        log_dir.rmdir()
+        deleted.append(str(log_dir))
+
+    _active_session = None
+    return {"status": "stopped", "deleted_artifacts": deleted}
+
+
+@mcp.tool()
+def check_collector_health() -> dict[str, Any]:
+    """Check if the debug collector is alive and responding."""
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    health_url = session.get("health_url")
+    if not health_url:
+        return {"error": "No health URL in session."}
+
+    try:
+        result = _http_get(health_url)
+        return {"status": "healthy", "details": result}
+    except (urllib.error.URLError, OSError) as e:
+        return {"status": "unhealthy", "error": str(e)}
+
+
+@mcp.tool()
+def ingest_log(
+    message: str,
+    hypothesis_id: str = "",
+    location: str = "",
+    run_id: str = "mcp",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Send a log entry to the debug collector.
+
+    Use this to record observations, variable states, control flow evidence,
+    or any data that helps confirm or reject hypotheses. Each log entry should
+    be mapped to at least one hypothesis when possible.
+
+    Args:
+        message: Descriptive log message (what this evidence shows).
+        hypothesis_id: Which hypothesis this log tests (e.g. "A", "B").
+        location: Source location (e.g. "src/cart.ts:42" or "checkout flow step 3").
+        run_id: Run identifier - use "mcp" for initial analysis, change for
+                before/after comparison.
+        data: Optional structured data (variable values, state snapshots, etc.).
+    """
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    ingest_url = session.get("ingest_url")
+    if not ingest_url:
+        return {"error": "No ingest URL in session."}
+
+    payload: dict[str, Any] = {"message": message, "runId": run_id}
+    if hypothesis_id:
+        payload["hypothesisId"] = hypothesis_id
+    if location:
+        payload["location"] = location
+    if data:
+        payload["data"] = data
+
+    try:
+        result = _http_post(ingest_url, data=payload)
+        return {"status": "logged", "entry": payload, "result": result}
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to ingest log: {e}"}
+
+
+@mcp.tool()
+def get_debug_state() -> dict[str, Any]:
+    """Get the full collector state: entry counts, run counts, hypothesis counts, and service metadata."""
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    state_url = session.get("state_url")
+    if not state_url:
+        return {"error": "No state URL in session."}
+
+    try:
+        return _http_get(state_url)
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to get state: {e}"}
+
+
+@mcp.tool()
+def get_debug_logs(
+    offset: int = 0,
+    limit: int = 120,
+    order: str = "desc",
+) -> dict[str, Any]:
+    """Get paginated debug log entries from the collector.
+
+    Args:
+        offset: Number of entries to skip.
+        limit: Maximum entries to return (max 300).
+        order: Sort order - 'asc' for oldest first, 'desc' for newest first.
+    """
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    logs_url = session.get("logs_url")
+    if not logs_url:
+        return {"error": "No logs URL in session."}
+
+    logs_url = f"{logs_url}?offset={offset}&limit={min(limit, 300)}&order={order}"
+    try:
+        return _http_get(logs_url)
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to get logs: {e}"}
+
+
+@mcp.tool()
+def clear_debug_logs() -> dict[str, Any]:
+    """Clear all debug logs for the current session.
+
+    Use this before a new reproduction run so stale entries don't pollute evidence.
+    """
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    clear_url = session.get("clear_url")
+    token = session.get("dashboard_token")
+    if not clear_url:
+        return {"error": "No clear URL in session."}
+
+    try:
+        return _http_post(clear_url, token=token)
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to clear logs: {e}"}
+
+
+@mcp.tool()
+def sync_instrumentation_locations(
+    locations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Sync active instrumentation locations with the collector.
+
+    This replaces the full set of tracked locations (replace semantics).
+    Call this after adding or removing instrumentation in your code.
+
+    Args:
+        locations: List of location objects, each with:
+            - location: str (e.g. "src/cart.ts:118")
+            - hypothesisIds: list[str] (e.g. ["A", "B"])
+    """
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    sync_url = session.get("locations_sync_url")
+    token = session.get("dashboard_token")
+    if not sync_url:
+        return {"error": "No sync URL in session."}
+
+    try:
+        return _http_post(sync_url, data={"locations": locations}, token=token)
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to sync locations: {e}"}
+
+
+@mcp.tool()
+def open_location_in_ide(location: str) -> dict[str, Any]:
+    """Open a source file location in the configured IDE.
+
+    Args:
+        location: Source location string, e.g. "src/cart.ts:42" or "src/cart.ts:42:5".
+    """
+    session = _require_session()
+    if "error" in session:
+        return session
+
+    open_url = session.get("open_location_url")
+    token = session.get("dashboard_token")
+    if not open_url:
+        return {"error": "No open-location URL in session."}
+    try:
+        return _http_post(open_url, data={"location": location}, token=token)
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": f"Failed to open location: {e}"}
+
+
+# --- Resources ---
+
+
+@mcp.resource("debug://workflow")
+def get_workflow() -> str:
+    """The full debug workflow (16-step evidence-first debugging process with guardrails)."""
+    return SKILL_MD.read_text(encoding="utf-8")
+
+
+@mcp.resource("debug://reference")
+def get_reference() -> str:
+    """Runtime debugging reference: collector bootstrap, log format, CORS, cleanup rules."""
+    return RUNTIME_DEBUGGING_MD.read_text(encoding="utf-8")
+
+
+# --- Prompts ---
+
+
+@mcp.prompt()
+def debug_workflow() -> str:
+    """The complete 16-step evidence-first debugging workflow.
+
+    Use this prompt to load the full debug methodology into your context
+    before starting a debugging session.
+    """
+    return SKILL_MD.read_text(encoding="utf-8")
+
+
+@mcp.prompt()
+def hypothesis_template(
+    bug_description: str = "",
+    hypotheses: str = "",
+) -> str:
+    """Structured template for generating and tracking debug hypotheses.
+
+    Args:
+        bug_description: Brief description of the bug being debuged.
+        hypotheses: Comma-separated list of hypothesis statements.
+    """
+    template = """# Debug Hypotheses
+
+## Bug
+{bug}
+
+## Hypotheses
+
+| ID | Hypothesis | Falsified By | Status |
+|----|-----------|--------------|--------|
+| A  | {h0} | | PENDING |
+| B  | {h1} | | PENDING |
+| C  | {h2} | | PENDING |
+| D  | {h3} | | PENDING |
+| E  | {h4} | | PENDING |
+
+## Instrumentation Plan
+
+For each hypothesis, identify:
+- What log point would confirm or reject it
+- Where in the code to inject it
+- What data to capture (parameters, return values, branch choice)
+
+## Evidence
+
+After reproduction, fill in:
+- Log entries that confirm/reject each hypothesis
+- Root cause (which hypothesis was CONFIRMED)
+- Fix applied
+
+## Verification
+
+After fix:
+- Post-fix log entries showing the issue is resolved
+- All temporary instrumentation removed
+"""
+    h_list = [h.strip() for h in hypotheses.split(",")] if hypotheses else [""] * 5
+    while len(h_list) < 5:
+        h_list.append("")
+    return template.format(
+        bug=bug_description or "(describe the bug)",
+        h0=h_list[0] or "(hypothesis A)",
+        h1=h_list[1] or "(hypothesis B)",
+        h2=h_list[2] or "(hypothesis C)",
+        h3=h_list[3] or "(hypothesis D)",
+        h4=h_list[4] or "(hypothesis E)",
+    )
+
+
+def main() -> None:
+    """Run the MCP server with stdio transport."""
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

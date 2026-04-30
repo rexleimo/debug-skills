@@ -7,6 +7,63 @@ description: Evidence-first runtime debugging for application bugs, regressions,
 
 Use runtime evidence before changing behavior. Treat code reading as context building, not proof.
 
+## MCP Server
+
+This skill is also available as an MCP server, so any MCP-compatible agent (Cursor, Windsurf, Claude Code, etc.) can use the debug workflow through standard tool calls.
+
+### Install
+
+```bash
+cd skills/debug/mcp_server
+uv sync
+```
+
+### Run
+
+```bash
+uv run skills/debug/mcp_server/server.py
+```
+
+### Configure in Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "debug": {
+      "command": "uv",
+      "args": ["run", "skills/debug/mcp_server/server.py"],
+      "cwd": "/path/to/debug-skills"
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|---|---|
+| `start_debug_session` | Start a collector session, returns endpoint + dashboard URL |
+| `stop_debug_session` | Stop collector, clean up all artifacts |
+| `check_collector_health` | Verify collector is alive |
+| `ingest_log` | Send a log entry (observation, variable state, control flow evidence) |
+| `get_debug_state` | Full state: entry/run/hypothesis counts |
+| `get_debug_logs` | Paginated log entries |
+| `clear_debug_logs` | Clear logs for next run |
+| `sync_instrumentation_locations` | Register active instrumentation points |
+| `open_location_in_ide` | Open source file in configured IDE |
+
+### MCP Resources
+
+- `debug://workflow` — full SKILL.md workflow
+- `debug://reference` — runtime debugging reference
+
+### MCP Prompts
+
+- `debug_workflow` — load the 16-step debugging methodology
+- `hypothesis_template` — structured hypothesis tracking template
+
 ## Host adaptation
 
 Before starting, normalize the current debugging environment without preflighting the target app:
