@@ -5,7 +5,8 @@ Exposes the debug skill's collector as MCP tools, resources, and prompts
 so any MCP-compatible agent can use the debug workflow.
 
 Run:
-    uv run skills/debug/mcp_server/server.py
+    cd mcp_server
+    uv run server.py
 """
 
 from __future__ import annotations

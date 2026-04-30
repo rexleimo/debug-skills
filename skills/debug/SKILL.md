@@ -1,6 +1,6 @@
 ---
 name: debug
-description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, tracking active log locations in a sidecar JSON file, using the collector dashboard to inspect those locations and open source through the configured IDE, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation, especially for browser or frontend issues where logs should go directly to the active collector endpoint instead of app-local proxy APIs.
+description: Evidence-first runtime debugging for application bugs, regressions, flaky behavior, and unclear failures, with an optional MCP server for exposing the workflow to MCP-compatible agents. Use when an agent is asked to debug an issue and should avoid speculative fixes by forming hypotheses, attaching to or starting a logging session, instrumenting code, collecting runtime logs, tracking active log locations in a sidecar JSON file, using the collector dashboard to inspect those locations and open source through the configured IDE, analyzing the recorded log file, applying only proven fixes, and verifying the result before removing instrumentation, especially for browser or frontend issues where logs should go directly to the active collector endpoint instead of app-local proxy APIs. Also use when configuring, running, or troubleshooting the debug MCP server in Cursor, Windsurf, Claude Code, or another MCP client.
 ---
 
 # Debug
@@ -13,15 +13,17 @@ This skill is also available as an MCP server, so any MCP-compatible agent (Curs
 
 ### Install
 
+From the installed `debug` skill directory:
+
 ```bash
-cd skills/debug/mcp_server
+cd mcp_server
 uv sync
 ```
 
 ### Run
 
 ```bash
-uv run skills/debug/mcp_server/server.py
+uv run server.py
 ```
 
 ### Configure in Claude Code
@@ -33,8 +35,8 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "debug": {
       "command": "uv",
-      "args": ["run", "skills/debug/mcp_server/server.py"],
-      "cwd": "/path/to/debug-skills"
+      "args": ["run", "server.py"],
+      "cwd": "/path/to/debug/mcp_server"
     }
   }
 }
