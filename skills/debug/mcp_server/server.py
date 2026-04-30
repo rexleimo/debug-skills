@@ -45,6 +45,7 @@ mcp = FastMCP(
 
 _active_session: dict[str, Any] | None = None
 _collector_process: subprocess.Popen | None = None
+_session_start_lock = asyncio.Lock()
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -104,6 +105,12 @@ def _validate_session_id(session_id: str) -> str | None:
         "session_id must be 1-128 characters and may contain only letters, "
         "numbers, '.', '_', and '-'. It cannot include path separators."
     )
+
+
+def _kill_and_reap_process(proc: subprocess.Popen, timeout: float = 2.0) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=timeout)
 
 
 def _file_uri_to_path(uri: Any) -> Path | None:
@@ -210,95 +217,104 @@ async def start_debug_session(
     if session_id_error:
         return {"error": session_id_error}
 
-    if _active_session is not None:
-        return {
-            "error": "A debug session is already active. Call stop_debug_session first.",
-            "session": _active_session,
-        }
+    async with _session_start_lock:
+        if _active_session is not None:
+            return {
+                "error": "A debug session is already active. Call stop_debug_session first.",
+                "session": _active_session,
+            }
 
-    try:
-        python_bin = _resolve_python3()
-    except RuntimeError as e:
-        return {"error": str(e)}
+        try:
+            python_bin = _resolve_python3()
+        except RuntimeError as e:
+            return {"error": str(e)}
 
-    ws, workspace_error = await _resolve_workspace_root(workspace_root, ctx)
-    if workspace_error:
-        return {"error": workspace_error}
-    assert ws is not None
+        ws, workspace_error = await _resolve_workspace_root(workspace_root, ctx)
+        if workspace_error:
+            return {"error": workspace_error}
+        assert ws is not None
 
-    log_dir = ws / ".debug-logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = ws / ".debug-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    log_file = log_dir / f"{session_id}.ndjson"
-    ready_file = log_dir / f"{session_id}.json"
-    location_state_file = log_dir / f"{session_id}.locations.json"
-    service_log_file = log_dir / f"{session_id}.service.log"
+        log_file = log_dir / f"{session_id}.ndjson"
+        ready_file = log_dir / f"{session_id}.json"
+        location_state_file = log_dir / f"{session_id}.locations.json"
+        service_log_file = log_dir / f"{session_id}.service.log"
 
-    try:
-        ready_file.unlink(missing_ok=True)
-    except OSError as e:
-        return {"error": f"Failed to clear stale ready file: {e}"}
+        try:
+            ready_file.unlink(missing_ok=True)
+        except OSError as e:
+            return {"error": f"Failed to clear stale ready file: {e}"}
 
-    cmd = [
-        python_bin,
-        str(COLLECTOR_MAIN),
-        "--log-file", str(log_file),
-        "--ready-file", str(ready_file),
-        "--location-state-file", str(location_state_file),
-        "--service-log-file", str(service_log_file),
-        "--session-id", session_id,
-        "--workspace-root", str(ws),
-    ]
-    if not open_dashboard:
-        cmd.append("--no-open-dashboard")
-    if ide:
-        cmd.extend(["--default-ide", ide])
+        cmd = [
+            python_bin,
+            str(COLLECTOR_MAIN),
+            "--log-file", str(log_file),
+            "--ready-file", str(ready_file),
+            "--location-state-file", str(location_state_file),
+            "--service-log-file", str(service_log_file),
+            "--session-id", session_id,
+            "--workspace-root", str(ws),
+        ]
+        if not open_dashboard:
+            cmd.append("--no-open-dashboard")
+        if ide:
+            cmd.extend(["--default-ide", ide])
 
-    try:
-        _collector_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(SKILL_ROOT / "scripts" / "local_log_collector"),
-        )
-    except OSError as e:
-        return {"error": f"Failed to start collector: {e}"}
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(SKILL_ROOT / "scripts" / "local_log_collector"),
+            )
+            _collector_process = proc
+        except OSError as e:
+            return {"error": f"Failed to start collector: {e}"}
 
-    # Wait for ready file (up to 10s)
-    for _ in range(100):
-        if ready_file.exists():
-            try:
-                raw = json.loads(ready_file.read_text())
-                session_info = {
-                    "status": "started",
-                    "session_id": session_id,
-                    "endpoint": raw.get("endpoint"),
-                    "dashboard_url": raw.get("dashboardUrl"),
-                    "ingest_url": raw.get("endpoint"),
-                    "health_url": raw.get("healthUrl"),
-                    "state_url": raw.get("stateUrl"),
-                    "logs_url": raw.get("logsUrl"),
-                    "clear_url": raw.get("clearUrl"),
-                    "locations_sync_url": raw.get("syncLocationsUrl"),
-                    "open_location_url": raw.get("openLocationUrl"),
-                    "shutdown_url": raw.get("shutdownUrl"),
-                    "dashboard_token": raw.get("dashboardToken"),
-                    "log_file": str(log_file),
-                    "pid": _collector_process.pid,
-                    "owned_artifacts": raw.get("ownedArtifacts", []),
-                }
-                _active_session = session_info
-                return dict(session_info)
-            except json.JSONDecodeError:
-                pass
-        if _collector_process.poll() is not None:
-            stderr = (_collector_process.stderr or b"").read().decode()
-            return {"error": f"Collector exited immediately: {stderr}"}
-        await asyncio.sleep(0.1)
+        # Wait for ready file (up to 10s)
+        for _ in range(100):
+            if ready_file.exists():
+                try:
+                    raw = json.loads(ready_file.read_text())
+                    session_info = {
+                        "status": "started",
+                        "session_id": session_id,
+                        "endpoint": raw.get("endpoint"),
+                        "dashboard_url": raw.get("dashboardUrl"),
+                        "ingest_url": raw.get("endpoint"),
+                        "health_url": raw.get("healthUrl"),
+                        "state_url": raw.get("stateUrl"),
+                        "logs_url": raw.get("logsUrl"),
+                        "clear_url": raw.get("clearUrl"),
+                        "locations_sync_url": raw.get("syncLocationsUrl"),
+                        "open_location_url": raw.get("openLocationUrl"),
+                        "shutdown_url": raw.get("shutdownUrl"),
+                        "dashboard_token": raw.get("dashboardToken"),
+                        "log_file": str(log_file),
+                        "pid": proc.pid,
+                        "owned_artifacts": raw.get("ownedArtifacts", []),
+                    }
+                    _active_session = session_info
+                    return dict(session_info)
+                except json.JSONDecodeError:
+                    pass
+            if proc.poll() is not None:
+                stderr = (proc.stderr or b"").read().decode()
+                if _collector_process is proc:
+                    _collector_process = None
+                return {"error": f"Collector exited immediately: {stderr}"}
+            await asyncio.sleep(0.1)
 
-    _collector_process.kill()
-    _collector_process = None
-    return {"error": "Collector did not write ready file within 10s"}
+        try:
+            await asyncio.to_thread(_kill_and_reap_process, proc)
+        except subprocess.TimeoutExpired:
+            return {"error": "Collector did not exit after timeout kill"}
+        finally:
+            if _collector_process is proc:
+                _collector_process = None
+        return {"error": "Collector did not write ready file within 10s"}
 
 
 @mcp.tool()
