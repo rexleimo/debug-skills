@@ -19,11 +19,12 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 COLLECTOR_MAIN = SKILL_ROOT / "scripts" / "local_log_collector" / "main.py"
@@ -94,15 +95,89 @@ def _resolve_python3() -> str:
     raise RuntimeError("No Python 3 interpreter found")
 
 
+def _file_uri_to_path(uri: Any) -> Path | None:
+    parsed = urllib.parse.urlparse(str(uri))
+    if parsed.scheme != "file":
+        return None
+
+    path_text = urllib.parse.unquote(parsed.path)
+    if parsed.netloc and parsed.netloc != "localhost":
+        path_text = f"//{parsed.netloc}{path_text}"
+    if (
+        os.name == "nt"
+        and path_text.startswith("/")
+        and len(path_text) > 2
+        and path_text[2] == ":"
+    ):
+        path_text = path_text[1:]
+    return Path(path_text).expanduser().resolve()
+
+
+async def _mcp_file_roots(ctx: Context | None) -> list[Path]:
+    if ctx is None:
+        return []
+    try:
+        roots_result = await ctx.session.list_roots()
+    except Exception:
+        return []
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for root in getattr(roots_result, "roots", []):
+        path = _file_uri_to_path(getattr(root, "uri", ""))
+        if path is None:
+            continue
+        text = str(path)
+        if text in seen:
+            continue
+        seen.add(text)
+        roots.append(path)
+    return roots
+
+
+async def _resolve_workspace_root(
+    workspace_root: str,
+    ctx: Context | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve the target workspace, preserving cwd as the legacy fallback."""
+    if workspace_root:
+        return Path(workspace_root).expanduser().resolve(), None
+
+    for env_name in (
+        "JUNERDD_DEBUG_WORKSPACE_ROOT",
+        "DEBUG_WORKSPACE_ROOT",
+        "MCP_WORKSPACE_ROOT",
+        "WORKSPACE_ROOT",
+        "PROJECT_ROOT",
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return Path(value).expanduser().resolve(), None
+
+    roots = await _mcp_file_roots(ctx)
+    if len(roots) == 1:
+        return roots[0], None
+    if len(roots) > 1:
+        candidates = ", ".join(str(root) for root in roots)
+        return (
+            None,
+            "Multiple MCP workspace roots are available. Pass the target project "
+            f"as workspace_root. Candidates: {candidates}",
+        )
+
+    return Path.cwd().resolve(), None
+
+
 # --- Tools ---
 
 
 @mcp.tool()
-def start_debug_session(
+async def start_debug_session(
     session_id: str = "mcp-debug",
     workspace_root: str = "",
     ide: str = "",
     open_dashboard: bool = True,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Start a debug collector session.
 
@@ -111,7 +186,9 @@ def start_debug_session(
 
     Args:
         session_id: Unique identifier for this debug session.
-        workspace_root: Workspace root for resolving relative paths. Defaults to cwd.
+        workspace_root: Workspace root for resolving relative paths. Defaults to the
+            selected workspace env vars, then the single MCP client root when available,
+            then cwd.
         ide: Default IDE id (cursor, vscode, windsurf, zed, webstorm, etc.).
         open_dashboard: Whether to auto-open the dashboard in a browser.
     """
@@ -128,7 +205,11 @@ def start_debug_session(
     except RuntimeError as e:
         return {"error": str(e)}
 
-    ws = Path(workspace_root).expanduser().resolve() if workspace_root else Path.cwd().resolve()
+    ws, workspace_error = await _resolve_workspace_root(workspace_root, ctx)
+    if workspace_error:
+        return {"error": workspace_error}
+    assert ws is not None
+
     log_dir = ws / ".debug-logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 

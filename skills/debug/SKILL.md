@@ -35,14 +35,25 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "debug": {
       "command": "uv",
-      "args": ["run", "server.py"],
-      "cwd": "/path/to/debug/mcp_server"
+      "args": [
+        "--project",
+        "/path/to/debug/mcp_server",
+        "run",
+        "/path/to/debug/mcp_server/server.py"
+      ],
+      "cwd": "/path/to/project"
     }
   }
 }
 ```
 
 ### Available MCP Tools
+
+The session writes `.debug-logs` under `workspace_root` when provided, then
+`JUNERDD_DEBUG_WORKSPACE_ROOT`/`DEBUG_WORKSPACE_ROOT`, then a single MCP client
+root when available, and otherwise the MCP server's current working directory.
+Configure the MCP server with the target project as `cwd` when you want the
+fallback to match the original current-directory behavior.
 
 | Tool | Description |
 |---|---|
