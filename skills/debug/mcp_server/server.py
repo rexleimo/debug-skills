@@ -11,13 +11,14 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,6 +45,7 @@ mcp = FastMCP(
 
 _active_session: dict[str, Any] | None = None
 _collector_process: subprocess.Popen | None = None
+SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 # --- HTTP helpers (stdlib only) ---
@@ -93,6 +95,15 @@ def _resolve_python3() -> str:
             except (subprocess.SubprocessError, OSError):
                 continue
     raise RuntimeError("No Python 3 interpreter found")
+
+
+def _validate_session_id(session_id: str) -> str | None:
+    if SESSION_ID_PATTERN.fullmatch(session_id):
+        return None
+    return (
+        "session_id must be 1-128 characters and may contain only letters, "
+        "numbers, '.', '_', and '-'. It cannot include path separators."
+    )
 
 
 def _file_uri_to_path(uri: Any) -> Path | None:
@@ -185,7 +196,8 @@ async def start_debug_session(
     including the ingest endpoint, dashboard URL, and dashboard token.
 
     Args:
-        session_id: Unique identifier for this debug session.
+        session_id: Unique identifier for this debug session. Use letters,
+            numbers, '.', '_', or '-' only; path separators are rejected.
         workspace_root: Workspace root for resolving relative paths. Defaults to the
             selected workspace env vars, then the single MCP client root when available,
             then cwd.
@@ -193,6 +205,10 @@ async def start_debug_session(
         open_dashboard: Whether to auto-open the dashboard in a browser.
     """
     global _active_session, _collector_process
+
+    session_id_error = _validate_session_id(session_id)
+    if session_id_error:
+        return {"error": session_id_error}
 
     if _active_session is not None:
         return {
@@ -278,7 +294,7 @@ async def start_debug_session(
         if _collector_process.poll() is not None:
             stderr = (_collector_process.stderr or b"").read().decode()
             return {"error": f"Collector exited immediately: {stderr}"}
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
 
     _collector_process.kill()
     _collector_process = None
