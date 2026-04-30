@@ -11,6 +11,7 @@ Run:
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import os
@@ -46,6 +47,7 @@ mcp = FastMCP(
 _active_session: dict[str, Any] | None = None
 _collector_process: subprocess.Popen | None = None
 _session_start_lock = asyncio.Lock()
+_shutdown_cleanup_registered = False
 SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -111,6 +113,67 @@ def _kill_and_reap_process(proc: subprocess.Popen, timeout: float = 2.0) -> None
     if proc.poll() is None:
         proc.kill()
     proc.wait(timeout=timeout)
+
+
+def _cleanup_collector_session() -> list[str]:
+    global _active_session, _collector_process
+
+    session = _active_session
+    proc = _collector_process
+    deleted: list[str] = []
+
+    if session is not None:
+        shutdown_url = session.get("shutdown_url")
+        token = session.get("dashboard_token")
+        if shutdown_url and token:
+            try:
+                _http_post(shutdown_url, token=token, timeout=3)
+            except (urllib.error.URLError, OSError):
+                pass
+
+    if proc is not None:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                _kill_and_reap_process(proc)
+            except subprocess.TimeoutExpired:
+                pass
+        finally:
+            if _collector_process is proc:
+                _collector_process = None
+
+    if session is not None:
+        for artifact_path in session.get("owned_artifacts", []):
+            p = Path(artifact_path)
+            if p.exists():
+                p.unlink()
+                deleted.append(str(p))
+
+        log_file = session.get("log_file", "")
+        if log_file:
+            log_dir = Path(log_file).parent
+            if log_dir.exists() and not any(log_dir.iterdir()):
+                log_dir.rmdir()
+                deleted.append(str(log_dir))
+
+    _active_session = None
+    return deleted
+
+
+def _handle_shutdown_signal(signum: int, _frame: object) -> None:
+    _cleanup_collector_session()
+    raise SystemExit(128 + signum)
+
+
+def _register_shutdown_cleanup() -> None:
+    global _shutdown_cleanup_registered
+    if _shutdown_cleanup_registered:
+        return
+    atexit.register(_cleanup_collector_session)
+    signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    _shutdown_cleanup_registered = True
 
 
 def _file_uri_to_path(uri: Any) -> Path | None:
@@ -325,48 +388,10 @@ def stop_debug_session() -> dict[str, Any]:
     (log files, ready files, location state), and removes the scratch
     directory if empty.
     """
-    global _active_session, _collector_process
-
-    if _active_session is None:
+    if _active_session is None and _collector_process is None:
         return {"error": "No active debug session."}
 
-    session = _active_session
-    shutdown_url = session.get("shutdown_url")
-    health_url = session.get("health_url")
-    token = session.get("dashboard_token")
-    artifacts = session.get("owned_artifacts", [])
-
-    # Send shutdown
-    if shutdown_url and token:
-        try:
-            _http_post(shutdown_url, token=token, timeout=3)
-        except (urllib.error.URLError, OSError):
-            pass
-
-    # Wait for process to exit
-    if _collector_process is not None:
-        try:
-            _collector_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _collector_process.kill()
-            _collector_process.wait(timeout=2)
-        _collector_process = None
-
-    # Delete artifacts
-    deleted: list[str] = []
-    for artifact_path in artifacts:
-        p = Path(artifact_path)
-        if p.exists():
-            p.unlink()
-            deleted.append(str(p))
-
-    # Remove .debug-logs if empty
-    log_dir = Path(session.get("log_file", "")).parent
-    if log_dir.exists() and not any(log_dir.iterdir()):
-        log_dir.rmdir()
-        deleted.append(str(log_dir))
-
-    _active_session = None
+    deleted = _cleanup_collector_session()
     return {"status": "stopped", "deleted_artifacts": deleted}
 
 
@@ -638,7 +663,11 @@ After fix:
 
 def main() -> None:
     """Run the MCP server with stdio transport."""
-    mcp.run(transport="stdio")
+    _register_shutdown_cleanup()
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        _cleanup_collector_session()
 
 
 if __name__ == "__main__":
